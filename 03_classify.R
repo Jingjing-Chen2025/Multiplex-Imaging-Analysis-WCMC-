@@ -1,7 +1,17 @@
 ###############################################################################
-# 03_classify.R  v11.1
+# 03_classify.R  v11.2
 #
-# Classification using corrected features from 02_segment_measure.R v11.1.
+# Classification using corrected features from 02_segment_measure.R v11.2.
+#
+# NOTE ON PMOT32 (v11.2):
+#   This script reads cells_raw.rds and never touches the TIFFs directly, so
+#   the PMOT32 re-acquisition (20260826, 8-cycle protocol with secondary-only
+#   negative controls, AR/DLL3 = Cycle 6) requires no path changes here.
+#   PMOT32 now carries the same blank-subtracted feature set as every other
+#   slide, so the blank false-positive control below is defined for all six
+#   slides and no slide-specific handling is needed.
+#   Ensure 01_channels.R and 02_segment_measure.R have been re-run against the
+#   new acquisition before running this script -- see the freshness guard below.
 #
 # Uses:
 #   - local perinuclear ring features
@@ -43,6 +53,41 @@ cells <- readRDS(infile)
 
 if (!nrow(cells)) {
   stop("cells_raw.rds has zero rows.", call. = FALSE)
+}
+
+## Expected slide set. All six now share the 8-cycle protocol with NC cycles.
+EXPECTED_SLIDES <- c("PMOT32", "PM677_A8", "PM12_B3",
+                     "PM1024_B", "PM423", "PM159T5")
+
+.present <- unique(cells$slide_id)
+.absent  <- setdiff(EXPECTED_SLIDES, .present)
+.extra   <- setdiff(.present, EXPECTED_SLIDES)
+
+if (length(.absent)) {
+  warning("cells_raw.rds is missing expected slide(s): ",
+          paste(.absent, collapse = ", "),
+          " -- was 02_segment_measure.R run on the full set?",
+          call. = FALSE)
+}
+
+if (length(.extra)) {
+  warning("cells_raw.rds contains unexpected slide(s): ",
+          paste(.extra, collapse = ", "),
+          call. = FALSE)
+}
+
+## Freshness guard: PMOT32 must come from the 20260826 re-acquisition, which
+## carries negative controls. A stale row from the old 6-cycle run would have
+## has_negctrl = FALSE and must not be classified with blank subtraction.
+if ("has_negctrl" %in% names(cells)) {
+  .no_nc <- unique(cells$slide_id[!cells$has_negctrl])
+  if (length(.no_nc)) {
+    stop("Slide(s) without negative controls in cells_raw.rds: ",
+         paste(.no_nc, collapse = ", "),
+         "\nThis indicates a stale segmentation. Re-run 01_channels.R and ",
+         "02_segment_measure.R against the current acquisitions.",
+         call. = FALSE)
+  }
 }
 
 PX_UM <- 12500 / 44643
@@ -176,9 +221,9 @@ missing <- setdiff(all_required, names(cells))
 
 if (length(missing)) {
   stop(
-    "Missing v11.1 corrected feature columns from 02:\n  ",
+    "Missing v11 corrected feature columns from 02:\n  ",
     paste(missing, collapse = "\n  "),
-    "\nRe-run 02_segment_measure.R v11.1 before 03.",
+    "\nRe-run 02_segment_measure.R v11.2 before 03.",
     call. = FALSE
   )
 }
