@@ -3,11 +3,11 @@
 #
 # Classification using corrected features from 02_segment_measure.R v11.2.
 #
-# NOTE ON PMOT32 (v11.2):
+# NOTE ON PM0T32 (v11.2):
 #   This script reads cells_raw.rds and never touches the TIFFs directly, so
-#   the PMOT32 re-acquisition (20260826, 8-cycle protocol with secondary-only
+#   the PM0T32 re-acquisition (20260826, 8-cycle protocol with secondary-only
 #   negative controls, AR/DLL3 = Cycle 6) requires no path changes here.
-#   PMOT32 now carries the same blank-subtracted feature set as every other
+#   PM0T32 now carries the same blank-subtracted feature set as every other
 #   slide, so the blank false-positive control below is defined for all six
 #   slides and no slide-specific handling is needed.
 #   Ensure 01_channels.R and 02_segment_measure.R have been re-run against the
@@ -56,7 +56,7 @@ if (!nrow(cells)) {
 }
 
 ## Expected slide set. All six now share the 8-cycle protocol with NC cycles.
-EXPECTED_SLIDES <- c("PMOT32", "PM677_A8", "PM12_B3",
+EXPECTED_SLIDES <- c("PM0T32", "PM677_A8", "PM12_B3",
                      "PM1024_B", "PM423", "PM159T5")
 
 .present <- unique(cells$slide_id)
