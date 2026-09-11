@@ -4,7 +4,7 @@
 # Tiled segmentation + corrected per-compartment marker feature extraction.
 #
 # CHANGE IN v11.2:
-#   PMOT32 has been re-run on the standard 8-cycle protocol WITH secondary-only
+#   PM0T32 has been re-run on the standard 8-cycle protocol WITH secondary-only
 #   negative controls (AR/DLL3 = Cycle 6). It is therefore no longer a protocol
 #   variant and is included by default, exactly like every other slide.
 #   The INCLUDE_* exclusion switch has been removed.
@@ -84,7 +84,7 @@ if (!exists("KEEP_RAW_MEANS")) KEEP_RAW_MEANS <- FALSE
 ## controls, so no slide-specific handling is required here.
 
 MANIFEST <- data.frame(
-  slide_id = c("PMOT32", "PM677_A8", "PM12_B3",
+  slide_id = c("PM0T32", "PM677_A8", "PM12_B3",
                "PM1024_B", "PM423", "PM159T5"),
   group    = c("NEPC", "NEPC", "NEPC",
                "ADENO", "ADENO", "ADENO"),
@@ -151,7 +151,7 @@ if (length(unknown)) {
   stop(
     "No channel map for: ",
     paste(unknown, collapse = ", "),
-    "\nRe-run 01_channels.R (PMOT32 was re-acquired 20260826 and must be re-mapped).",
+    "\nRe-run 01_channels.R (PM0T32 was re-acquired 20260826 and must be re-mapped).",
     call. = FALSE
   )
 }
