@@ -3,7 +3,7 @@
 #'
 #' Path-agnostic: the `tiff` argument is supplied by the caller from
 #' `slides$tiff` (see 00_config.R). No slide-specific logic lives here --
-#' PMOT32 now uses the same 8-cycle protocol as every other slide, so
+#' PM0T32 now uses the same 8-cycle protocol as every other slide, so
 #' channel indices are resolved upstream via `cyc_AR_DLL3` / `cyc_CK_PDGF`.
 img_read <- function(tiff, c_index, x0 = 0, y0 = 0, w = NULL, h = NULL) {
   if (READER_ACTIVE == "bioformats") {
