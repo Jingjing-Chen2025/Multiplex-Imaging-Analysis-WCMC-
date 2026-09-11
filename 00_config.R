@@ -113,18 +113,17 @@ suppressPackageStartupMessages({
 message("Reader backend active: ", READER_ACTIVE)
 
 ## ------------------------------------------------------------ BATCH TABLE ---
-## Derived from the six COMET protocol logs.
-##   PMOT32    : 6-cycle protocol, NO negative controls (AR/DLL3 = Cycle 4)
-##   all others: 8-cycle protocol, negative controls    (AR/DLL3 = Cycle 6)
+## Derived from the COMET protocol logs.
+##   All slides: 8-cycle protocol, negative controls (AR/DLL3 = Cycle 6)
 ##   Negative-control pairing (species/fluorophore matched):
 ##     Cycle 5 (anti-Mouse647 / anti-Rabbit555) -> controls Cycle 6 (AR, DLL3)
 ##     Cycle 3 (anti-Mouse555 / anti-Rabbit647) -> controls Cycle 7 (panCK, PDGFa)
 slides <- tribble(
   ~slide_id,  ~group,           ~stainer, ~run,       ~comet_sw, ~n_cycles, ~has_negctrl, ~runtime_min, ~dir, ~file,
 
-  "PMOT32",   "NEPC",           NA_integer_, "20260420", "1.4.1.0", 6L, FALSE, 527L,
-    "20260420_JJ_full panel_test_PMOT32",
-    "20260420_141534_1_0RPELT_JJ_full panel.tiff",
+  "PMOT32",   "NEPC",           1L, "20260826", "1.5.0.0", 8L, TRUE, NA_integer_,
+    "20260826_155725_1_ybucNp_JJ_full panel_PM0 T32",
+    "20260826_155725_1_ybucNp_JJ_full panel_PM0 T32.tiff",
 
   "PM677_A8", "NEPC",           1L, "20260608", "1.4.1.0", 8L, TRUE, 760L,
     "20260608_164617_1_ahXvmt_JJ_full panel_PM677 A8",
@@ -159,7 +158,7 @@ slides <- tribble(
 
     ## analysis tiers
     tier1 = TRUE,                 # all 6 slides, AF-only correction  (PRIMARY)
-    tier2 = has_negctrl,          # 5 slides, negative-control correction
+    tier2 = has_negctrl,          # 6 slides, negative-control correction
     tier3 = run == "20260608"     # within-batch: 2 NEPC vs 1 adeno, same sw/lots
   )
 
@@ -182,13 +181,12 @@ cat("\n--- group x n_cycles ---\n");        print(with(slides, table(group, n_cy
 .sw_nepc  <- unique(slides$comet_sw[slides$group == "NEPC"])
 .sw_adeno <- unique(slides$comet_sw[slides$group == "Adenocarcinoma"])
 if (!setequal(.sw_nepc, .sw_adeno))
-  warning("COMET software version differs between groups (1.5.0.0 only in ",
-          "adenocarcinoma). Rely on Tier 3 (20260608 within-batch) as the ",
-          "technical control.", call. = FALSE)
+  warning("COMET software version differs between groups. Rely on Tier 3 ",
+          "(20260608 within-batch) as the technical control.", call. = FALSE)
 
 if (any(!slides$has_negctrl))
-  warning("PMOT32 (NEPC) has no negative-control cycles. Tier 1 uses AF-only ",
-          "correction on ALL slides for comparability; Tier 2 drops PMOT32.",
+  warning("One or more slides lack negative-control cycles. Tier 1 uses AF-only ",
+          "correction on ALL slides for comparability; Tier 2 drops them.",
           call. = FALSE)
 
 if (PDGF_IS_LIGAND)
