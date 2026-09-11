@@ -3,11 +3,11 @@
 #
 # Classification using corrected features from 02_segment_measure.R v11.3+.
 #
-# NOTE ON PMOT32 (v11.2+):
+# NOTE ON PM0T32 (v11.2+):
 #   This script reads cells_raw.rds and never touches the TIFFs directly, so
-#   the PMOT32 re-acquisition (20260826, 8-cycle protocol with secondary-only
+#   the PM0T32 re-acquisition (20260826, 8-cycle protocol with secondary-only
 #   negative controls, AR/DLL3 = Cycle 6) requires no path changes here.
-#   PMOT32 now carries the same blank-subtracted feature set as every other
+#   PM0T32 now carries the same blank-subtracted feature set as every other
 #   slide, so the blank false-positive control below is defined for all six
 #   slides and no slide-specific handling is needed.
 #   Ensure 01_channels.R and 02_segment_measure.R have been re-run against the
@@ -17,7 +17,7 @@
 #   - local perinuclear ring features
 #   - pixel-level scaled blank correction from 02_segment_measure.R
 #   - AF puncta exclusion
-#   - radius sensitivity, 4 / 6 / 8 µm
+#   - radius sensitivity, 4 / 6 / 8 um
 #   - blank false-positive control
 #   - marker usability QC before population assignment
 #
@@ -59,7 +59,7 @@ if (!nrow(cells)) {
 }
 
 ## Expected slide set. All six now share the 8-cycle protocol with NC cycles.
-EXPECTED_SLIDES <- c("PMOT32", "PM677_A8", "PM12_B3",
+EXPECTED_SLIDES <- c("PM0T32", "PM677_A8", "PM12_B3",
                      "PM1024_B", "PM423", "PM159T5")
 
 .present <- unique(cells$slide_id)
@@ -79,11 +79,11 @@ if (length(.extra)) {
           call. = FALSE)
 }
 
-## Freshness guard: PMOT32 must come from the 20260826 re-acquisition, which
-## carries negative controls. A stale row from the old 6-cycle run would have
-## has_negctrl = FALSE and must not be classified with blank subtraction.
+## Freshness guard: every classified slide must carry negative controls. A stale
+## row from an old run would have has_negctrl = FALSE or NA and must not be
+## classified with blank subtraction.
 if ("has_negctrl" %in% names(cells)) {
-  .no_nc <- unique(cells$slide_id[!cells$has_negctrl])
+  .no_nc <- unique(cells$slide_id[!(cells$has_negctrl %in% TRUE)])
   if (length(.no_nc)) {
     stop("Slide(s) without negative controls in cells_raw.rds: ",
          paste(.no_nc, collapse = ", "),
@@ -91,6 +91,9 @@ if ("has_negctrl" %in% names(cells)) {
          "02_segment_measure.R against the current acquisitions.",
          call. = FALSE)
   }
+} else {
+  stop("cells_raw.rds is missing has_negctrl; re-run revised 02_segment_measure.R first.",
+       call. = FALSE)
 }
 
 PX_UM <- 12500 / 44643
@@ -108,10 +111,20 @@ MIN_REG_COR  <- 0.85
 
 cells$area_um2 <- cells$area * PX_UM^2
 
+## v11.3 registration QC treats empty/flat windows as unknown, not failed.
+## Keep unknown/non-informative tiles; only drop informative tiles that fail.
+if (!"reg_qc_informative" %in% names(cells)) {
+  cells$reg_qc_informative <- is.finite(cells$reg_cor)
+}
+
 keep <- is.finite(cells$area_um2) &
         cells$area_um2 >= MIN_AREA_UM2 &
         cells$area_um2 <= MAX_AREA_UM2 &
-        (is.na(cells$reg_cor) | cells$reg_cor >= MIN_REG_COR)
+        (
+          !(cells$reg_qc_informative %in% TRUE) |
+            is.na(cells$reg_cor) |
+            cells$reg_cor >= MIN_REG_COR
+        )
 
 cat("QC keep:", sum(keep), "/", nrow(cells), "cells\n")
 
@@ -150,7 +163,7 @@ MIN_FRAC <- c(
 
 ## Retired v11.2 strong-fraction override.
 ## The old gate allowed `score > 0 & frac >= HIGH_FRAC`, which is unsafe when
-## marker and blank differ by a small acquisition gain. A PMOT32-like positive
+## marker and blank differ by a small acquisition gain. A PM0T32-like positive
 ## residual pedestal can make many cells positive even without marker-specific
 ## signal. v11.3 keeps this object only for backwards-compatible QC output; it
 ## is not used in the positivity gate.
@@ -237,7 +250,7 @@ if (length(missing)) {
   stop(
     "Missing v11 corrected feature columns from 02:\n  ",
     paste(missing, collapse = "\n  "),
-    "\nRe-run 02_segment_measure.R v11.2+ before 03.",
+    "\nRe-run 02_segment_measure.R v11.3+ before 03.",
     call. = FALSE
   )
 }
@@ -363,7 +376,7 @@ gate_marker_one_slide <- function(d, marker, r_um = RING_UM_PRIMARY, blank = FAL
 }
 
 ###############################################################################
-## PRIMARY CLASSIFICATION, 6 µm
+## PRIMARY CLASSIFICATION, 6 um
 ###############################################################################
 
 for (m in names(MARKER_COMPARTMENT)) {
@@ -462,14 +475,14 @@ write.csv(
   row.names = FALSE
 )
 
-cat("\n=== Primary marker gates, 6 µm:\n")
+cat("\n=== Primary marker gates, 6 um:\n")
 print(qc_gates)
 
-cat("\n=== Blank false-positive control, 6 µm:\n")
+cat("\n=== Blank false-positive control, 6 um:\n")
 print(qc_blank_false_positive)
 
 ###############################################################################
-## MARKER USABILITY QC, 6 µm
+## MARKER USABILITY QC, 6 um
 ###############################################################################
 
 marker_usability <- do.call(rbind, lapply(unique(cells$slide_id), function(sid) {
@@ -506,7 +519,7 @@ marker_usability <- do.call(rbind, lapply(unique(cells$slide_id), function(sid) 
                    enrichment < MIN_MARKER_TO_BLANK_ENRICHMENT
 
     ## Catch channels where the marker is highly explained by the matched blank
-    ## and marker-vs-blank enrichment is weak. This is the PMOT32 PDGF/PDGFRα
+    ## and marker-vs-blank enrichment is weak. This is the PM0T32 PDGF/PDGFRa
     ## failure mode, but the rule is data-driven and applies to all slides.
     fail_gain <- is.finite(r2) &&
                  r2 >= MAX_GAIN_R2_FOR_WEAK_ENRICHMENT &&
@@ -541,7 +554,7 @@ marker_usability <- do.call(rbind, lapply(unique(cells$slide_id), function(sid) 
   }))
 }))
 
-cat("\n=== Marker usability, primary 6 µm:\n")
+cat("\n=== Marker usability, primary 6 um:\n")
 print(marker_usability, row.names = FALSE)
 
 write.csv(
@@ -563,7 +576,7 @@ for (m in names(MARKER_COMPARTMENT)) {
 }
 
 ###############################################################################
-## RADIUS SENSITIVITY, 4 / 6 / 8 µm
+## RADIUS SENSITIVITY, 4 / 6 / 8 um
 ###############################################################################
 
 sens <- list()
@@ -633,7 +646,7 @@ cells$CEBPg_neg <- !cells$CEBPg_pos
 cells$ASPC_raw <- (cells$CEBPg_pos & cells$PDGF_pos) |
                   (cells$CEBPg_neg & cells$PDGF_pos)
 
-## PDGF/PDGFRα must be usable on the slide before ASPC can be asserted.
+## PDGF/PDGFRa must be usable on the slide before ASPC can be asserted.
 ## If not callable, raw calls are retained in ASPC_raw for audit but excluded
 ## from ASPC and downstream abundance/spatial analyses.
 cells$ASPC_callable <- cells$PDGF_usable %in% TRUE
@@ -692,7 +705,7 @@ saveRDS(cells, file.path(OUT, "cells_classified.rds"))
 cat("\n=== Cells per slide after QC:\n")
 print(table(cells$slide_id))
 
-cat("\n=== Single-marker positive fraction by slide, primary 6 µm:\n")
+cat("\n=== Single-marker positive fraction by slide, primary 6 um:\n")
 
 marker_frac <- sapply(names(MARKER_COMPARTMENT), function(m) {
   tapply(cells[[paste0(m, "_pos")]], cells$slide_id, mean, na.rm = TRUE)
@@ -706,7 +719,7 @@ write.csv(
   row.names = FALSE
 )
 
-cat("\n=== Single-marker blank false-positive fraction by slide, primary 6 µm:\n")
+cat("\n=== Single-marker blank false-positive fraction by slide, primary 6 um:\n")
 
 blank_frac <- sapply(names(MARKER_COMPARTMENT), function(m) {
   tapply(cells[[paste0(m, "_blank_pos")]], cells$slide_id, mean, na.rm = TRUE)
@@ -754,7 +767,7 @@ population_counts <- data.frame(
   row.names = NULL
 )
 
-cat("\n=== Population counts by slide, primary 6 µm:\n")
+cat("\n=== Population counts by slide, primary 6 um:\n")
 print(population_counts)
 
 write.csv(
@@ -769,7 +782,7 @@ for (cl in setdiff(names(population_fractions), c("slide_id", "n_cells", "ASPC_c
   population_fractions[[cl]] <- population_fractions[[cl]] / population_fractions$n_cells
 }
 
-cat("\n=== Population fractions by slide, primary 6 µm:\n")
+cat("\n=== Population fractions by slide, primary 6 um:\n")
 print(population_fractions)
 
 write.csv(
