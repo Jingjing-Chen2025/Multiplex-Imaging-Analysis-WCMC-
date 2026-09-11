@@ -18,8 +18,9 @@
 #        Ring radii: 4, 6, 8 µm.
 #        Primary ring radius: 6 µm.
 #
-#   3. Pixel-level matched-blank subtraction:
-#        marker - matched secondary-only negative control.
+#   3. Pixel-level scaled matched-blank subtraction:
+#        marker - (blank intercept + blank slope * matched secondary-only
+#        negative control), fit on valid non-AF pixels after upper-tail trimming.
 #
 #   4. AF puncta exclusion:
 #        pixels bright in both marker and matched blank are masked,
@@ -225,6 +226,7 @@ PY_ENV <- "r-reticulate"
 
 suppressPackageStartupMessages({
   library(EBImage)
+  library(MASS)
   library(dplyr)
   library(purrr)
   library(tibble)
@@ -676,10 +678,74 @@ if (grepl("^tifffile\\+zarr", READ_MODE)) {
   as.matrix(af)
 }
 
+.fit_blank_affine <- function(marker_img, blank_img, valid_pix, af) {
+  out <- list(intercept = 0, slope = 1, r2 = NA_real_)
+
+  ok <- valid_pix &
+        !af &
+        is.finite(marker_img) &
+        is.finite(blank_img)
+
+  if (!any(ok)) return(out)
+
+  marker <- as.numeric(marker_img[ok])
+  blank  <- as.numeric(blank_img[ok])
+
+  q_marker <- .qsafe(marker, 0.99, default = Inf)
+  q_blank  <- .qsafe(blank,  0.99, default = Inf)
+
+  keep <- is.finite(marker) &
+          is.finite(blank) &
+          marker <= q_marker &
+          blank <= q_blank
+
+  marker <- marker[keep]
+  blank  <- blank[keep]
+
+  if (length(marker) > PIX_SAMPLE_N) {
+    set.seed(1L)
+    idx <- sample.int(length(marker), PIX_SAMPLE_N)
+    marker <- marker[idx]
+    blank  <- blank[idx]
+  }
+
+  if (length(marker) < 3L || stats::sd(blank, na.rm = TRUE) <= 0) {
+    return(out)
+  }
+
+  fit_df <- data.frame(marker = marker, blank = blank)
+  fit <- try(suppressWarnings(MASS::rlm(marker ~ blank, data = fit_df)), silent = TRUE)
+
+  if (inherits(fit, "try-error")) {
+    fit <- try(stats::lm(marker ~ blank, data = fit_df), silent = TRUE)
+  }
+
+  if (inherits(fit, "try-error")) return(out)
+
+  cf <- try(stats::coef(fit), silent = TRUE)
+  if (inherits(cf, "try-error") || length(cf) < 2L || any(!is.finite(cf[1:2]))) {
+    return(out)
+  }
+
+  fitted <- try(as.numeric(stats::predict(fit, newdata = fit_df)), silent = TRUE)
+  if (!inherits(fitted, "try-error") && length(fitted) == nrow(fit_df) && all(is.finite(fitted))) {
+    sst <- sum((fit_df$marker - mean(fit_df$marker))^2)
+    sse <- sum((fit_df$marker - fitted)^2)
+    if (is.finite(sst) && sst > 0 && is.finite(sse)) {
+      out$r2 <- max(min(1 - sse / sst, 1), 0)
+    }
+  }
+
+  out$intercept <- as.numeric(cf[1])
+  out$slope <- as.numeric(cf[2])
+  out
+}
+
 .correct_marker_pixels <- function(marker_img, blank_img, valid_pix) {
   af <- .make_af_mask(marker_img, blank_img, valid_pix)
+  blank_fit <- .fit_blank_affine(marker_img, blank_img, valid_pix, af)
 
-  resid <- marker_img - blank_img
+  resid <- marker_img - (blank_fit$intercept + blank_fit$slope * blank_img)
 
   bg_pix <- valid_pix &
             !af &
@@ -715,7 +781,10 @@ if (grepl("^tifffile\\+zarr", READ_MODE)) {
     af = af,
     bg = bg,
     pix_thr = pix_thr,
-    noise = sc
+    noise = sc,
+    blank_intercept = blank_fit$intercept,
+    blank_slope = blank_fit$slope,
+    blank_r2 = blank_fit$r2
   )
 }
 
@@ -729,8 +798,19 @@ if (grepl("^tifffile\\+zarr", READ_MODE)) {
     bg       = rep(cc$bg,      nmax),
     pix_thr  = rep(cc$pix_thr, nmax),
     noise    = rep(cc$noise,   nmax),
+    blank_intercept = rep(cc$blank_intercept, nmax),
+    blank_slope     = rep(cc$blank_slope,     nmax),
+    blank_r2        = rep(cc$blank_r2,        nmax),
     stringsAsFactors = FALSE
   )
+}
+
+.col_or_na <- function(df, name) {
+  if (name %in% names(df)) df[[name]] else rep(NA_real_, nrow(df))
+}
+
+.median_or_na <- function(x) {
+  suppressWarnings(median(x, na.rm = TRUE))
 }
 
 .ring_tag <- function(r_um) {
@@ -1208,6 +1288,13 @@ corr_audit <- do.call(rbind, lapply(unique(cells_raw$slide_id), function(sid) {
     blank_sub_col  <- paste0(pre, "_blank_sub")
     blank_frac_col <- paste0(pre, "_blank_frac_pos")
     blank_af_col   <- paste0(pre, "_blank_af_frac")
+    blank_intercept_col <- paste0(pre, "_blank_intercept")
+    blank_slope_col     <- paste0(pre, "_blank_slope")
+    blank_r2_col        <- paste0(pre, "_blank_r2")
+
+    blank_ctrl_intercept_col <- paste0(pre, "_blank_blank_intercept")
+    blank_ctrl_slope_col     <- paste0(pre, "_blank_blank_slope")
+    blank_ctrl_r2_col        <- paste0(pre, "_blank_blank_r2")
 
     data.frame(
       slide_id = sid,
@@ -1215,23 +1302,29 @@ corr_audit <- do.call(rbind, lapply(unique(cells_raw$slide_id), function(sid) {
       compartment = cp,
       radius_um = ifelse(cp == "ring", RING_UM_PRIMARY, NA),
 
-      median_sub = round(median(d[[sub_col]], na.rm = TRUE), 3),
-      p95_sub = round(.qsafe(d[[sub_col]], .95), 3),
-      p99_sub = round(.qsafe(d[[sub_col]], .99), 3),
-      median_frac_pos = round(median(d[[frac_col]], na.rm = TRUE), 4),
-      p95_frac_pos = round(.qsafe(d[[frac_col]], .95), 4),
-      p99_frac_pos = round(.qsafe(d[[frac_col]], .99), 4),
-      median_af_frac = round(median(d[[af_col]], na.rm = TRUE), 4),
-      p99_af_frac = round(.qsafe(d[[af_col]], .99), 4),
+      median_sub = round(.median_or_na(.col_or_na(d, sub_col)), 3),
+      p95_sub = round(.qsafe(.col_or_na(d, sub_col), .95), 3),
+      p99_sub = round(.qsafe(.col_or_na(d, sub_col), .99), 3),
+      median_frac_pos = round(.median_or_na(.col_or_na(d, frac_col)), 4),
+      p95_frac_pos = round(.qsafe(.col_or_na(d, frac_col), .95), 4),
+      p99_frac_pos = round(.qsafe(.col_or_na(d, frac_col), .99), 4),
+      median_af_frac = round(.median_or_na(.col_or_na(d, af_col)), 4),
+      p99_af_frac = round(.qsafe(.col_or_na(d, af_col), .99), 4),
+      median_blank_intercept = round(.median_or_na(.col_or_na(d, blank_intercept_col)), 4),
+      median_blank_slope = round(.median_or_na(.col_or_na(d, blank_slope_col)), 4),
+      median_blank_r2 = round(.median_or_na(.col_or_na(d, blank_r2_col)), 4),
 
-      blank_median_sub = round(median(d[[blank_sub_col]], na.rm = TRUE), 3),
-      blank_p95_sub = round(.qsafe(d[[blank_sub_col]], .95), 3),
-      blank_p99_sub = round(.qsafe(d[[blank_sub_col]], .99), 3),
-      blank_median_frac_pos = round(median(d[[blank_frac_col]], na.rm = TRUE), 4),
-      blank_p95_frac_pos = round(.qsafe(d[[blank_frac_col]], .95), 4),
-      blank_p99_frac_pos = round(.qsafe(d[[blank_frac_col]], .99), 4),
-      blank_median_af_frac = round(median(d[[blank_af_col]], na.rm = TRUE), 4),
-      blank_p99_af_frac = round(.qsafe(d[[blank_af_col]], .99), 4),
+      blank_median_sub = round(.median_or_na(.col_or_na(d, blank_sub_col)), 3),
+      blank_p95_sub = round(.qsafe(.col_or_na(d, blank_sub_col), .95), 3),
+      blank_p99_sub = round(.qsafe(.col_or_na(d, blank_sub_col), .99), 3),
+      blank_median_frac_pos = round(.median_or_na(.col_or_na(d, blank_frac_col)), 4),
+      blank_p95_frac_pos = round(.qsafe(.col_or_na(d, blank_frac_col), .95), 4),
+      blank_p99_frac_pos = round(.qsafe(.col_or_na(d, blank_frac_col), .99), 4),
+      blank_median_af_frac = round(.median_or_na(.col_or_na(d, blank_af_col)), 4),
+      blank_p99_af_frac = round(.qsafe(.col_or_na(d, blank_af_col), .99), 4),
+      blank_control_median_blank_intercept = round(.median_or_na(.col_or_na(d, blank_ctrl_intercept_col)), 4),
+      blank_control_median_blank_slope = round(.median_or_na(.col_or_na(d, blank_ctrl_slope_col)), 4),
+      blank_control_median_blank_r2 = round(.median_or_na(.col_or_na(d, blank_ctrl_r2_col)), 4),
 
       stringsAsFactors = FALSE
     )
@@ -1264,29 +1357,42 @@ radius_feature_audit <- do.call(rbind, lapply(unique(cells_raw$slide_id), functi
       blank_sub_col  <- paste0(pre, "_blank_sub")
       blank_frac_col <- paste0(pre, "_blank_frac_pos")
       blank_af_col   <- paste0(pre, "_blank_af_frac")
+      blank_intercept_col <- paste0(pre, "_blank_intercept")
+      blank_slope_col     <- paste0(pre, "_blank_slope")
+      blank_r2_col        <- paste0(pre, "_blank_r2")
+
+      blank_ctrl_intercept_col <- paste0(pre, "_blank_blank_intercept")
+      blank_ctrl_slope_col     <- paste0(pre, "_blank_blank_slope")
+      blank_ctrl_r2_col        <- paste0(pre, "_blank_blank_r2")
 
       data.frame(
         slide_id = sid,
         marker = m,
         radius_um = r_um,
 
-        median_sub = round(median(d[[sub_col]], na.rm = TRUE), 3),
-        p95_sub = round(.qsafe(d[[sub_col]], .95), 3),
-        p99_sub = round(.qsafe(d[[sub_col]], .99), 3),
-        median_frac_pos = round(median(d[[frac_col]], na.rm = TRUE), 4),
-        p95_frac_pos = round(.qsafe(d[[frac_col]], .95), 4),
-        p99_frac_pos = round(.qsafe(d[[frac_col]], .99), 4),
-        median_af_frac = round(median(d[[af_col]], na.rm = TRUE), 4),
-        p99_af_frac = round(.qsafe(d[[af_col]], .99), 4),
+        median_sub = round(.median_or_na(.col_or_na(d, sub_col)), 3),
+        p95_sub = round(.qsafe(.col_or_na(d, sub_col), .95), 3),
+        p99_sub = round(.qsafe(.col_or_na(d, sub_col), .99), 3),
+        median_frac_pos = round(.median_or_na(.col_or_na(d, frac_col)), 4),
+        p95_frac_pos = round(.qsafe(.col_or_na(d, frac_col), .95), 4),
+        p99_frac_pos = round(.qsafe(.col_or_na(d, frac_col), .99), 4),
+        median_af_frac = round(.median_or_na(.col_or_na(d, af_col)), 4),
+        p99_af_frac = round(.qsafe(.col_or_na(d, af_col), .99), 4),
+        median_blank_intercept = round(.median_or_na(.col_or_na(d, blank_intercept_col)), 4),
+        median_blank_slope = round(.median_or_na(.col_or_na(d, blank_slope_col)), 4),
+        median_blank_r2 = round(.median_or_na(.col_or_na(d, blank_r2_col)), 4),
 
-        blank_median_sub = round(median(d[[blank_sub_col]], na.rm = TRUE), 3),
-        blank_p95_sub = round(.qsafe(d[[blank_sub_col]], .95), 3),
-        blank_p99_sub = round(.qsafe(d[[blank_sub_col]], .99), 3),
-        blank_median_frac_pos = round(median(d[[blank_frac_col]], na.rm = TRUE), 4),
-        blank_p95_frac_pos = round(.qsafe(d[[blank_frac_col]], .95), 4),
-        blank_p99_frac_pos = round(.qsafe(d[[blank_frac_col]], .99), 4),
-        blank_median_af_frac = round(median(d[[blank_af_col]], na.rm = TRUE), 4),
-        blank_p99_af_frac = round(.qsafe(d[[blank_af_col]], .99), 4),
+        blank_median_sub = round(.median_or_na(.col_or_na(d, blank_sub_col)), 3),
+        blank_p95_sub = round(.qsafe(.col_or_na(d, blank_sub_col), .95), 3),
+        blank_p99_sub = round(.qsafe(.col_or_na(d, blank_sub_col), .99), 3),
+        blank_median_frac_pos = round(.median_or_na(.col_or_na(d, blank_frac_col)), 4),
+        blank_p95_frac_pos = round(.qsafe(.col_or_na(d, blank_frac_col), .95), 4),
+        blank_p99_frac_pos = round(.qsafe(.col_or_na(d, blank_frac_col), .99), 4),
+        blank_median_af_frac = round(.median_or_na(.col_or_na(d, blank_af_col)), 4),
+        blank_p99_af_frac = round(.qsafe(.col_or_na(d, blank_af_col), .99), 4),
+        blank_control_median_blank_intercept = round(.median_or_na(.col_or_na(d, blank_ctrl_intercept_col)), 4),
+        blank_control_median_blank_slope = round(.median_or_na(.col_or_na(d, blank_ctrl_slope_col)), 4),
+        blank_control_median_blank_r2 = round(.median_or_na(.col_or_na(d, blank_ctrl_r2_col)), 4),
 
         stringsAsFactors = FALSE
       )
