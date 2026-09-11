@@ -121,7 +121,7 @@ message("Reader backend active: ", READER_ACTIVE)
 slides <- tribble(
   ~slide_id,  ~group,           ~stainer, ~run,       ~comet_sw, ~n_cycles, ~has_negctrl, ~runtime_min, ~dir, ~file,
 
-  "PMOT32",   "NEPC",           1L, "20260826", "1.5.0.0", 8L, TRUE, NA_integer_,
+  "PM0T32",   "NEPC",           1L, "20260826", "1.5.0.0", 8L, TRUE, NA_integer_,
     "20260826_155725_1_ybucNp_JJ_full panel_PM0 T32",
     "20260826_155725_1_ybucNp_JJ_full panel_PM0 T32.tiff",
 
