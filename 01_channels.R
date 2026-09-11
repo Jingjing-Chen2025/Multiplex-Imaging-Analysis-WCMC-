@@ -3,14 +3,14 @@
 # Build the per-slide channel map (chmap) DIRECTLY from OME-XML metadata.
 #
 # WHY v4:
-#   (a) PMOT32 was re-acquired 20260826 on the standard 8-cycle protocol WITH
+#   (a) PM0T32 was re-acquired 20260826 on the standard 8-cycle protocol WITH
 #       secondary-only negative controls (AR/DLL3 = Cycle 6). The hardcoded
 #       20260420 path override is removed and replaced with a generic
 #       .ome.tiff resolver that applies to every slide.
 #   (b) Marker matching was done with literal regexes against the raw channel
 #       name, so "JJ pan - CK - 1-200" (spaces around the hyphen, as written in
 #       the 20260826 jobfile) failed to match "pan-?ck" and panCK resolved to
-#       NA on PMOT32 only. Matching is now done against a NORMALISED name with
+#       NA on PM0T32 only. Matching is now done against a NORMALISED name with
 #       all non-alphanumeric characters stripped, which tolerates arbitrary
 #       spacing, punctuation, vendor prefixes and dilution suffixes.
 #   (c) Marker assignments are now cross-checked against the expected
@@ -50,7 +50,7 @@ dir.create(OUT, showWarnings = FALSE, recursive = TRUE)
 slides <- readRDS(file.path(OUT, "slides_final.rds"))
 
 ## ---- prefer .ome.tiff sidecars, for every slide ----------------------------
-## Replaces the v3 PMOT32-specific path override. If a matching .ome.tiff sits
+## Replaces the v3 PM0T32-specific path override. If a matching .ome.tiff sits
 ## next to the plain .tiff, use it, because only the OME variant carries the
 ## Channel metadata this script depends on.
 resolve_ome <- function(p) {
@@ -131,7 +131,7 @@ ome_px_um <- function(tiff) {
 ## COMET channel names are free text and vary between operators and software
 ## versions. Observed forms for pan-cytokeratin across this cohort include
 ##   "JJ pan-CK"          (1.4.1.0 runs)
-##   "JJ pan - CK - 1-200" (1.5.0.0, PMOT32 20260826)
+##   "JJ pan - CK - 1-200" (1.5.0.0, PM0T32 20260826)
 ## A literal regex on the raw string matches the first and not the second.
 ##
 ## Fix: normalise by lowercasing and deleting every non-alphanumeric character
