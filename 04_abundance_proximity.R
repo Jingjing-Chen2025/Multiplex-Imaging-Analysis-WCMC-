@@ -6,7 +6,7 @@
 #   relationships to epithelial and neuroendocrine tumour-cell populations.
 #
 # v11.4 CHANGE
-#   PMOT32 re-acquired 20260826 on the standard 8-cycle protocol WITH
+#   PM0T32 re-acquired 20260826 on the standard 8-cycle protocol WITH
 #   secondary-only negative controls (AR/DLL3 = Cycle 6). It is no longer a
 #   protocol variant, so all six slides now carry the full blank-subtracted
 #   feature set and the blank false-positive controls are defined for every
@@ -131,7 +131,7 @@ ROOT <- "/Volumes/T9/Case Studies"
 
 MANIFEST <- data.frame(
   slide_id = c(
-    "PMOT32", "PM677_A8", "PM12_B3",
+    "PM0T32", "PM677_A8", "PM12_B3",
     "PM1024_B", "PM423", "PM159T5"
   ),
   group = c(
@@ -188,7 +188,7 @@ if (length(absent)) {
 }
 
 ## Freshness guard: every slide should now carry negative controls. A stale
-## PMOT32 from the retired 6-cycle acquisition would have has_negctrl = FALSE
+## PM0T32 from the retired 6-cycle acquisition would have has_negctrl = FALSE
 ## and would make the blank-adjusted sections below meaningless for that slide.
 if ("has_negctrl" %in% names(cells)) {
   .no_nc <- unique(cells$slide_id[!cells$has_negctrl])
