@@ -1,11 +1,18 @@
 ###############################################################################
-# 04_abundance_proximity.R  v11.3-compatible
+# 04_abundance_proximity.R  v11.4-compatible
 #
 # PURPOSE
 #   Quantify PDGFRα-defined ASPC-like stromal-cell abundance and spatial
 #   relationships to epithelial and neuroendocrine tumour-cell populations.
 #
-# v11.3 CHANGE
+# v11.4 CHANGE
+#   PMOT32 re-acquired 20260826 on the standard 8-cycle protocol WITH
+#   secondary-only negative controls (AR/DLL3 = Cycle 6). It is no longer a
+#   protocol variant, so all six slides now carry the full blank-subtracted
+#   feature set and the blank false-positive controls are defined for every
+#   slide. MANIFEST path updated accordingly.
+#
+# v11.3 CHANGE (retained)
 #   Relaxed filters so all slides present in cells_classified.rds are included
 #   in abundance, spatial-bin rho, proximity, neighbourhood, and spatial-map
 #   outputs. Original tier2/tier3 annotations are retained as QC labels but do
@@ -116,6 +123,9 @@ keep_fig <- function(p, w = 10, h = 6) {
 ###############################################################################
 ## SLIDE MANIFEST
 ###############################################################################
+## All six slides now share the 8-cycle protocol with secondary-only negative
+## controls (AR/DLL3 = Cycle 6). The tiff paths are recorded here for
+## provenance only; this script reads cells_classified.rds, not the images.
 
 ROOT <- "/Volumes/T9/Case Studies"
 
@@ -129,7 +139,7 @@ MANIFEST <- data.frame(
     "ADENO", "ADENO", "ADENO"
   ),
   tiff = file.path(ROOT, c(
-    "20260420_JJ_full panel_test_PMOT32/20260420_141534_1_0RPELT_JJ_full panel.tiff",
+    "20260826_155725_1_ybucNp_JJ_full panel_PM0 T32/20260826_155725_1_ybucNp_JJ_full panel_PM0 T32.tiff",
     "20260608_164617_1_ahXvmt_JJ_full panel_PM677 A8/20260608_164617_1_ahXvmt_JJ_full panel_PM677 A8.tiff",
     "20260608_164617_2_9ZdZ8V_JJ_full panel_PM12 B3/20260608_164617_2_9ZdZ8V_JJ_full panel_PM12 B3.tiff",
     "20260608_164617_4_CA2z2F_JJ_full panel_PM1024 B/20260608_164617_4_CA2z2F_JJ_full panel_PM1024 B.tiff",
@@ -177,6 +187,22 @@ if (length(absent)) {
   )
 }
 
+## Freshness guard: every slide should now carry negative controls. A stale
+## PMOT32 from the retired 6-cycle acquisition would have has_negctrl = FALSE
+## and would make the blank-adjusted sections below meaningless for that slide.
+if ("has_negctrl" %in% names(cells)) {
+  .no_nc <- unique(cells$slide_id[!cells$has_negctrl])
+  if (length(.no_nc)) {
+    warning(
+      "Slide(s) without negative controls in cells_classified.rds: ",
+      paste(.no_nc, collapse = ", "),
+      " -- blank-adjusted metrics are not interpretable for these. ",
+      "Re-run 01-03 against the current acquisitions.",
+      call. = FALSE
+    )
+  }
+}
+
 cells <- cells |>
   filter(slide_id %in% present) |>
   select(-any_of("group")) |>
@@ -221,6 +247,7 @@ cells <- cells |>
   )
 
 ## Blank false-positive population controls if blank gates exist.
+## All six slides now carry NC cycles, so these should always be present.
 if (all(c(
   "PDGF_blank_pos",
   "panCK_blank_pos",
@@ -236,7 +263,8 @@ if (all(c(
     )
 } else {
   warning(
-    "Blank false-positive gate columns not all present; blank controls set to NA.",
+    "Blank false-positive gate columns not all present; blank controls set to NA. ",
+    "All slides now have NC cycles, so this indicates a stale cells_classified.rds.",
     call. = FALSE
   )
 
