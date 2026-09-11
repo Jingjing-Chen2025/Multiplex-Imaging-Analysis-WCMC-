@@ -115,7 +115,7 @@ ROOT <- "/Volumes/T9/Case Studies"
 
 MANIFEST <- data.frame(
   slide_id = c(
-    "PMOT32", "PM677_A8", "PM12_B3",
+    "PM0T32", "PM677_A8", "PM12_B3",
     "PM1024_B", "PM423", "PM159T5"
   ),
   group = c(
