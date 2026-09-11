@@ -1,9 +1,15 @@
 ###############################################################################
-# 02_segment_measure.R  v11.1
+# 02_segment_measure.R  v11.2
 #
 # Tiled segmentation + corrected per-compartment marker feature extraction.
 #
-# v11.1 image-analysis model:
+# CHANGE IN v11.2:
+#   PMOT32 has been re-run on the standard 8-cycle protocol WITH secondary-only
+#   negative controls (AR/DLL3 = Cycle 6). It is therefore no longer a protocol
+#   variant and is included by default, exactly like every other slide.
+#   The INCLUDE_* exclusion switch has been removed.
+#
+# v11 image-analysis model:
 #   1. Nuclear markers:
 #        CEBPg, AR measured in eroded nuclear masks.
 #
@@ -61,7 +67,6 @@ dir.create(OUT, showWarnings = FALSE, recursive = TRUE)
 
 if (!exists("ROOT")) ROOT <- "/Volumes/T9/Case Studies"
 
-if (!exists("INCLUDE_PMOT32")) INCLUDE_PMOT32 <- FALSE
 if (!exists("PROCEED_DESPITE_AF")) PROCEED_DESPITE_AF <- TRUE
 
 ## These can be overridden before source("02_segment_measure.R").
@@ -75,6 +80,8 @@ if (!exists("KEEP_RAW_MEANS")) KEEP_RAW_MEANS <- FALSE
 ###############################################################################
 ## SLIDE MANIFEST
 ###############################################################################
+## All six slides now share the 8-cycle protocol with secondary-only negative
+## controls, so no slide-specific handling is required here.
 
 MANIFEST <- data.frame(
   slide_id = c("PMOT32", "PM677_A8", "PM12_B3",
@@ -82,7 +89,7 @@ MANIFEST <- data.frame(
   group    = c("NEPC", "NEPC", "NEPC",
                "ADENO", "ADENO", "ADENO"),
   tiff = file.path(ROOT, c(
-    "20260420_JJ_full panel_test_PMOT32/20260420_141534_1_0RPELT_JJ_full panel.tiff",
+    "20260826_155725_1_ybucNp_JJ_full panel_PM0 T32/20260826_155725_1_ybucNp_JJ_full panel_PM0 T32.tiff",
     "20260608_164617_1_ahXvmt_JJ_full panel_PM677 A8/20260608_164617_1_ahXvmt_JJ_full panel_PM677 A8.tiff",
     "20260608_164617_2_9ZdZ8V_JJ_full panel_PM12 B3/20260608_164617_2_9ZdZ8V_JJ_full panel_PM12 B3.tiff",
     "20260608_164617_4_CA2z2F_JJ_full panel_PM1024 B/20260608_164617_4_CA2z2F_JJ_full panel_PM1024 B.tiff",
@@ -90,11 +97,6 @@ MANIFEST <- data.frame(
     "20260625_131600_3_VHgSnt_JJ_full panel_PM159T5/20260625_131600_3_VHgSnt_JJ_full panel_PM159T5.tiff")),
   stringsAsFactors = FALSE
 )
-
-if (!INCLUDE_PMOT32) {
-  message("EXCLUDING PMOT32 by default: protocol variant lacks secondary-only NC cycles.")
-  MANIFEST <- MANIFEST[MANIFEST$slide_id != "PMOT32", , drop = FALSE]
-}
 
 resolve_tiff <- function(p) {
   if (grepl("\\.ome\\.tiff?$", p, ignore.case = TRUE)) return(p)
@@ -149,7 +151,7 @@ if (length(unknown)) {
   stop(
     "No channel map for: ",
     paste(unknown, collapse = ", "),
-    "\nRe-run 01_channels.R.",
+    "\nRe-run 01_channels.R (PMOT32 was re-acquired 20260826 and must be re-mapped).",
     call. = FALSE
   )
 }
@@ -168,6 +170,16 @@ for (cl in c("tier2", "tier3", "has_negctrl")) {
 
 for (cl in c("run", "comet_sw")) {
   if (!cl %in% names(slides)) slides[[cl]] <- NA
+}
+
+## All slides must now carry negative controls; the correction model requires it.
+if (any(!slides$has_negctrl, na.rm = TRUE)) {
+  stop(
+    "Slide(s) without secondary-only negative controls: ",
+    paste(slides$slide_id[!slides$has_negctrl], collapse = ", "),
+    "\nv11 matched-blank subtraction requires NC cycles on every slide.",
+    call. = FALSE
+  )
 }
 
 cat("\nGroups:\n")
