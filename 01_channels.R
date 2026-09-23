@@ -44,7 +44,7 @@ suppressPackageStartupMessages({
 })
 use_virtualenv("r-reticulate", required = TRUE)
 
-OUT <- "results_ASPC_NEPC"
+if (!exists("OUT")) OUT <- "/Volumes/T9/results_ASPC_NEPC"
 dir.create(OUT, showWarnings = FALSE, recursive = TRUE)
 
 slides <- readRDS(file.path(OUT, "slides_final.rds"))

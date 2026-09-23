@@ -59,7 +59,7 @@ bind_rows  <- dplyr::bind_rows
 ## USER SETTINGS
 ###############################################################################
 
-if (!exists("OUT")) OUT <- "results_ASPC_NEPC"
+if (!exists("OUT")) OUT <- "/Volumes/T9/results_ASPC_NEPC"
 
 PLOTDIR <- file.path(OUT, "plots")
 dir.create(PLOTDIR, showWarnings = FALSE, recursive = TRUE)
@@ -114,25 +114,12 @@ keep_fig <- function(p, w = 10, h = 6) {
 ## SLIDE MANIFEST
 ###############################################################################
 
-ROOT <- "/Volumes/T9/Case Studies"
-
+## Slide table is owned by 00_config.R.
+.sf <- readRDS(file.path(OUT, "slides_final.rds"))
 MANIFEST <- data.frame(
-  slide_id = c(
-    "PM0T32", "PM677_A8", "PM12_B3",
-    "PM1024_B", "PM423", "PM159T5"
-  ),
-  group = c(
-    "NEPC", "NEPC", "NEPC",
-    "ADENO", "ADENO", "ADENO"
-  ),
-  tiff = file.path(ROOT, c(
-    "20260826_155725_1_ybucNp_JJ_full panel_PM0 T32/20260826_155725_1_ybucNp_JJ_full panel_PM0 T32.tiff",
-    "20260608_164617_1_ahXvmt_JJ_full panel_PM677 A8/20260608_164617_1_ahXvmt_JJ_full panel_PM677 A8.tiff",
-    "20260608_164617_2_9ZdZ8V_JJ_full panel_PM12 B3/20260608_164617_2_9ZdZ8V_JJ_full panel_PM12 B3.tiff",
-    "20260608_164617_4_CA2z2F_JJ_full panel_PM1024 B/20260608_164617_4_CA2z2F_JJ_full panel_PM1024 B.tiff",
-    "20260625_131559_2_ZxKUqB_JJ_full panel_PM423/20260625_131559_2_ZxKUqB_JJ_full panel_PM423.tiff",
-    "20260625_131600_3_VHgSnt_JJ_full panel_PM159T5/20260625_131600_3_VHgSnt_JJ_full panel_PM159T5.tiff"
-  )),
+  slide_id = .sf$slide_id,
+  group = as.character(.sf$group),
+  tiff = .sf$tiff,
   stringsAsFactors = FALSE
 )
 
@@ -492,13 +479,27 @@ tile_area_mm2_by_slide <- cells |>
   filter(slide_id %in% tier2_ok) |>
   group_by(slide_id) |>
   summarise(
-    inferred_tile_size_px = infer_tile_size(dplyr::cur_data_all()),
+    inferred_tile_size_px = infer_tile_size(dplyr::pick(dplyr::everything())),
     n_cellbearing_tiles = n_distinct(paste(tile_x, tile_y)),
     cellbearing_tile_mm2 =
       n_cellbearing_tiles * inferred_tile_size_px^2 * PX_UM^2 / 1e6,
     nuclear_area_mm2 = sum(area, na.rm = TRUE) * PX_UM^2 / 1e6,
     .groups = "drop"
   )
+
+## Tissue area from the slide-level tissue mask written by 02 (preferred
+## denominator for densities; cell-bearing tile area over-counts tissue at
+## section edges).
+tissue_area_file <- file.path(OUT, "tissue_area_by_slide.csv")
+if (file.exists(tissue_area_file)) {
+  tile_area_mm2_by_slide <- left_join(
+    tile_area_mm2_by_slide,
+    read.csv(tissue_area_file, stringsAsFactors = FALSE)[, c("slide_id", "tissue_mm2")],
+    by = "slide_id"
+  )
+} else {
+  tile_area_mm2_by_slide$tissue_mm2 <- tile_area_mm2_by_slide$cellbearing_tile_mm2
+}
 
 write.csv(
   tile_area_mm2_by_slide,
@@ -557,8 +558,10 @@ ab_slide <- cells |>
   ) |>
   left_join(tile_area_mm2_by_slide, by = "slide_id") |>
   mutate(
-    aspc_per_mm2 = n_ASPC / pmax(cellbearing_tile_mm2, 1e-9),
-    aspc_raw_per_mm2 = n_ASPC_raw / pmax(cellbearing_tile_mm2, 1e-9)
+    aspc_per_mm2 = n_ASPC / pmax(tissue_mm2, 1e-9),
+    aspc_raw_per_mm2 = n_ASPC_raw / pmax(tissue_mm2, 1e-9),
+    epi_ca_per_mm2 = n_EPI_CA / pmax(tissue_mm2, 1e-9),
+    ne_ca_per_mm2 = n_NE_CA / pmax(tissue_mm2, 1e-9)
   )
 
 cat("\nAbundance by slide:\n")
@@ -569,7 +572,7 @@ write.csv(ab_slide, file.path(OUT, "aspc_abundance.csv"), row.names = FALSE)
 ab_tests <- rbind(
   cmp(ab_slide, "frac_ASPC", "ASPC fraction of all cells", "higher_in_NEPC"),
   cmp(ab_slide, "aspc_per_1000_cells", "ASPC per 1000 cells", "higher_in_NEPC"),
-  cmp(ab_slide, "aspc_per_mm2", "ASPC per mm2 cell-bearing tile area", "higher_in_NEPC"),
+  cmp(ab_slide, "aspc_per_mm2", "ASPC per mm2 tissue", "higher_in_NEPC"),
   cmp(ab_slide, "aspc_per_epi_ca", "ASPC per epithelial cancer cell", "higher_in_NEPC"),
   cmp(ab_slide, "aspc_per_tumour", "ASPC per tumour cell", "higher_in_NEPC"),
   cmp(ab_slide, "frac_ASPC_CEBPg_pos", "ASPC CEBPg+ fraction of all cells", "higher_in_NEPC"),
@@ -964,51 +967,120 @@ if (!nrow(prox)) {
 ## 4. NEIGHBOURHOOD COMPOSITION AROUND ASPC
 ###############################################################################
 
+## v11.7 capped the search at the 100 nearest cells (which truncates the
+## 50 um disc in dense tumour) and looped over populations in R. Now: an exact
+## radius search per slide, which also yields per-cell neighbourhood flags
+## used by 05_visualize.R:
+##   in_ASPC_nbhd        cell lies within RADIUS_UM of at least one ASPC
+##                       (ASPC themselves included)
+##   n_ASPC_within_r     number of ASPC (other than itself) within RADIUS_UM
+## Composition is reported two ways:
+##   pooled_pairs: all (ASPC, neighbour) pairs within the radius, as before;
+##   unique_cells: distinct cells inside the union of ASPC discs, compared with
+##                 whole-slide composition (the "ASPC neighbourhood" itself).
+
 rad_px <- RADIUS_UM / PX_UM
+if (!exists("NBR_K")) NBR_K <- 400L
 
-nbr <- bind_rows(lapply(tier3_ok, function(sid) {
-  d <- cells |> filter(slide_id == sid)
+NBR_POPS <- c("ASPC", "EPI_CA", "NE_CA", "Multi", "Other")
 
-  if (!nrow(d) || sum(d$ASPC, na.rm = TRUE) < MIN_N) return(NULL)
+cells$in_ASPC_nbhd <- FALSE
+cells$n_ASPC_within_r <- 0L
+
+nbr_list <- list()
+nbr_comp_list <- list()
+
+for (sid in tier3_ok) {
+  ii <- which(cells$slide_id == sid)
+  d <- cells[ii, c("x_px", "y_px", "pop", "ASPC", "group")]
+  ia <- which(d$ASPC)
+
+  if (!length(ia)) next
 
   xy <- as.matrix(d[, c("x_px", "y_px")])
-  k <- min(100L, nrow(d))
+  k <- min(NBR_K, nrow(d))
 
-  nn <- RANN::nn2(
-    xy,
-    xy[which(d$ASPC), , drop = FALSE],
-    k = k
-  )
+  nn <- RANN::nn2(xy, xy[ia, , drop = FALSE], k = k,
+                  searchtype = "radius", radius = rad_px)
+  idx <- nn$nn.idx
+  idx[idx == 0L | nn$nn.dists > rad_px] <- NA_integer_
+  sat <- mean(!is.na(idx[, k]))
+  if (sat > 0.01) {
+    warning(sid, ": ", round(100 * sat, 1), "% of ASPC discs hit NBR_K = ", k,
+            " neighbours; raise NBR_K.", call. = FALSE)
+  }
 
-  pops <- c(
-    "EPI_CA", "NE_CA", "ASPC", "Multi",
-    "ASPC_not_callable", "EPI_CA_not_callable", "NE_CA_not_callable",
-    "Other"
-  )
+  ## drop self
+  idx[idx == matrix(ia, nrow(idx), ncol(idx))] <- NA_integer_
 
-  cnt <- vapply(pops, function(p) {
-    sum(vapply(seq_len(nrow(nn$nn.idx)), function(i) {
-      within <- nn$nn.dists[i, ] <= rad_px
-      j <- nn$nn.idx[i, ][within]
-      dist_j <- nn$nn.dists[i, ][within]
-      j <- j[dist_j > 0]
-      sum(d$pop[j] == p, na.rm = TRUE)
-    }, numeric(1)))
-  }, numeric(1))
+  nb <- as.vector(idx)
+  nb <- nb[!is.na(nb)]
 
-  obs <- as.numeric(cnt / max(sum(cnt), 1))
-  exp <- as.numeric(table(factor(d$pop, levels = pops))) / nrow(d)
+  hits <- tabulate(nb, nbins = nrow(d))
+  in_nb <- hits > 0L
+  in_nb[ia] <- TRUE
 
-  data.frame(
+  cells$in_ASPC_nbhd[ii] <- in_nb
+  cells$n_ASPC_within_r[ii] <- hits
+
+  grp <- as.character(d$group[1])
+  pop_f <- function(v) factor(v, levels = NBR_POPS)
+
+  pair_cnt <- as.numeric(table(pop_f(d$pop[nb])))
+  obs <- pair_cnt / max(sum(pair_cnt), 1)
+  exp <- as.numeric(table(pop_f(d$pop))) / nrow(d)
+
+  if (length(ia) >= MIN_N) {
+    nbr_list[[sid]] <- data.frame(
+      slide_id = sid,
+      group = grp,
+      n_ASPC = length(ia),
+      neighbour = NBR_POPS,
+      n_pairs = pair_cnt,
+      obs_frac = round(obs, 4),
+      exp_frac = round(exp, 4),
+      log2_enrich = round(log2((obs + 1e-4) / (exp + 1e-4)), 2),
+      row.names = NULL
+    )
+  }
+
+  ## Cells within RADIUS_UM of at least one OTHER ASPC (other ASPC count, so
+  ## ASPC-ASPC clustering is visible; a lone ASPC is not its own neighbour).
+  uniq <- as.numeric(table(pop_f(d$pop[hits > 0L])))
+  nbr_comp_list[[sid]] <- data.frame(
     slide_id = sid,
-    group = as.character(unique(d$group))[1],
-    neighbour = pops,
-    obs_frac = round(obs, 3),
-    exp_frac = round(exp, 3),
-    log2_enrich = round(log2((obs + 1e-4) / (exp + 1e-4)), 2),
+    group = grp,
+    radius_um = RADIUS_UM,
+    n_ASPC = length(ia),
+    n_cells_slide = nrow(d),
+    n_cells_in_nbhd = sum(in_nb),
+    frac_slide_cells_in_nbhd = round(mean(in_nb), 4),
+    population = NBR_POPS,
+    n_in_nbhd = uniq,
+    frac_in_nbhd = round(uniq / max(sum(uniq), 1), 4),
+    frac_whole_slide = round(exp, 4),
+    log2_enrich_vs_slide = round(log2((uniq / max(sum(uniq), 1) + 1e-4) / (exp + 1e-4)), 2),
     row.names = NULL
   )
-}))
+}
+
+nbr <- bind_rows(nbr_list)
+nbr_comp <- bind_rows(nbr_comp_list)
+
+if (nrow(nbr_comp)) {
+  write.csv(nbr_comp, file.path(OUT, "aspc_neighbourhood_composition.csv"), row.names = FALSE)
+  cat("\nASPC neighbourhood (union of ", RADIUS_UM, " um discs) vs whole slide:\n", sep = "")
+  print(nbr_comp, row.names = FALSE)
+}
+
+## Slim per-cell table for visualisation / export.
+cells_spatial <- cells[, intersect(c(
+  "cell_id", "slide_id", "group", "x_px", "y_px", "area_um2", "pop",
+  "ASPC", "ASPC_CEBPg_pos", "ASPC_CEBPg_neg", "EPI_CA", "NE_CA", "multi_pop",
+  "in_ASPC_nbhd", "n_ASPC_within_r", "tile_x", "tile_y"
+), names(cells))]
+cells_spatial$px_um <- PX_UM
+saveRDS(cells_spatial, file.path(OUT, "cells_spatial.rds"))
 
 if (nrow(nbr)) {
   nbr$group <- factor(nbr$group, levels = GROUPS)
@@ -1031,7 +1103,7 @@ if (nrow(nbr)) {
 
 hyp_parts <- list(
   ab_tests |>
-    filter(metric == "ASPC per mm2 cell-bearing tile area") |>
+    filter(metric == "ASPC per mm2 tissue") |>
     mutate(prediction = "(i) ASPC more abundant in NEPC"),
 
   aspc_enrich_tests |>
@@ -1371,21 +1443,18 @@ if (nrow(map_dat)) {
     theme_bw() +
     guides(colour = guide_legend(override.aes = list(size = 3)))
 
-  save_pdf(pmap, "04_spatial_maps.pdf", 12, 8)
-  keep_fig(pmap, 12, 8)
-
-  PDF_DEV(
-    file.path(PLOTDIR, "04_spatial_maps_perslide.pdf"),
-    width = 8,
-    height = 8,
-    onefile = TRUE
-  )
+  ## Millions of points: write raster PNGs, not vector PDFs.
+  ggplot2::ggsave(file.path(PLOTDIR, "04_spatial_maps.png"), pmap,
+                  width = 12, height = 8, dpi = 200)
+  message("  wrote 04_spatial_maps.png")
 
   for (sid in unique(map_dat$slide_id)) {
     d <- map_dat |> filter(slide_id == sid)
 
-    print(
-      ggplot(mapping = aes(x_mm, y_mm, colour = pop)) +
+    ggplot2::ggsave(
+      file.path(PLOTDIR, paste0("04_spatial_map_", sid, ".png")),
+      width = 9, height = 9, dpi = 200,
+      plot = ggplot(mapping = aes(x_mm, y_mm, colour = pop)) +
         geom_point(
           data = dplyr::filter(d, pop == "Other"),
           size = 0.08,
@@ -1424,8 +1493,7 @@ if (nrow(map_dat)) {
     )
   }
 
-  invisible(dev.off())
-  message("  wrote 04_spatial_maps_perslide.pdf")
+  message("  wrote 04_spatial_map_<slide>.png")
 } else {
   warning("No cells available for spatial maps after slide filtering.", call. = FALSE)
 }
