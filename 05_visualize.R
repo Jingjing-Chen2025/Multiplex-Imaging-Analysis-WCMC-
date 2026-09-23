@@ -293,7 +293,7 @@ visualize_slide <- function(k) {
   called <- called[order(called$pop == "ASPC"), ]        # ASPC drawn last
   pB <- ggplot(called, aes(x_mm, y_mm, colour = pop)) +
     annotation_raster(bg_r, ext_mm[1], ext_mm[2], ext_mm[3], ext_mm[4]) +
-    geom_point(size = 0.12, alpha = 0.75, stroke = 0, shape = 16) +
+    geom_point(size = 0.45, alpha = 0.85, stroke = 0, shape = 16) +
     scale_colour_manual(
       values = POP_COLS, drop = FALSE,
       labels = function(b) paste0(POP_LABEL[b], "  n=", format(as.integer(counts[b]), big.mark = ","))
@@ -330,8 +330,8 @@ visualize_slide <- function(k) {
     ncnt <- table(nbd$pop)
     pC <- ggplot(mapping = aes(x_mm, y_mm, colour = pop)) +
       annotation_raster(nb_r, ext_mm[1], ext_mm[2], ext_mm[3], ext_mm[4]) +
-      geom_point(data = nbd, size = 0.15, alpha = 0.8, stroke = 0, shape = 16) +
-      geom_point(data = a, size = 0.35, alpha = 1, stroke = 0, shape = 16) +
+      geom_point(data = nbd, size = 0.3, alpha = 0.8, stroke = 0, shape = 16) +
+      geom_point(data = a, size = 0.45, alpha = 1, stroke = 0, shape = 16) +
       scale_colour_manual(
         values = POP_COLS, drop = FALSE,
         labels = function(b) ifelse(
