@@ -1,24 +1,31 @@
-# Multiplex Imaging Analysis (WCMC) — ASPC / epithelial / NEPC
+# Multiplex Imaging Analysis (WCMC) — PDGFRA+ stroma / epithelial / NE cancer
 
 R pipeline for Lunaphore COMET sequential-IF prostate cancer sections
-("JJ_full panel": CEBPg, FOLH1, AR, DLL3, pan-CK, PDGFa + secondary-only
+("JJ_full panel": CEBPD, FOLH1, AR, DLL3, pan-CK, PDGFRA + secondary-only
 negative controls). It segments nuclei, measures control-subtracted marker
-signal, calls cell populations, analyses the ASPC neighbourhood and draws
-per-biopsy figures.
+signal, calls cell populations, and analyses abundance, proximity and
+neighbourhoods. The COMET files originally named the PDGFRA channel "PDGFa"
+and the CEBPD channel "CEBPg"; both were corrected on 2026-10-12.
 
 ## Cell populations
 
-| Call | Rule |
-|---|---|
-| ASPC | PDGFa+ (split into CEBPg+ / CEBPg− subsets) |
-| EPI_CA | pan-CK+ and (FOLH1+ or AR+) |
-| NE_CA | DLL3+ |
-| Multi | more than one of the above |
+| Call | Rule | Role |
+|---|---|---|
+| PDGFRA | PDGFRA+ | main stromal population |
+| PDGFRA_CEBPDpos | PDGFRA+ CEBPD+ | exploratory split of PDGFRA+ |
+| PDGFRA_CEBPDneg | PDGFRA+ CEBPD− | exploratory split of PDGFRA+ |
+| EPI_CA1 | AR+ FOLH1+ pan-CK+ | epithelial cancer |
+| EPI_CA2 | AR+ FOLH1− pan-CK+ | epithelial cancer |
+| NE_CA | DLL3+ | neuroendocrine cancer |
+| Multi | meets more than one of PDGFRA / EPI_CA1 / EPI_CA2 / NE_CA | |
+
+Blank false-positive controls apply the same rules to the matched
+secondary-only channels.
 
 ## Requirements
 
 - R ≥ 4.3 with EBImage, dplyr, tidyr, purrr, tibble, ggplot2, MASS, RANN, xml2, reticulate
-- Python virtualenv named `r-reticulate` with tifffile, zarr (≥ 3), numpy, imagecodecs
+- Python virtualenv named `r-reticulate` with tifffile, zarr, numpy, imagecodecs
 - Raw data: one OME-TIFF per slide under `ROOT` (default `/Volumes/T9/Case Studies`)
 
 ## Run
@@ -28,37 +35,26 @@ Rscript -e 'source("00_config.R"); source("01_channels.R")'   # slide table, cha
 ./run_02_parallel.sh                                           # segmentation (hours; 3 workers)
 Rscript -e 'source("03_classify.R")'                           # marker gates + population calls
 Rscript -e 'source("04_abundance_proximity.R")'                # abundance, proximity, neighbourhood
-Rscript -e 'source("05_visualize.R")'                          # per-slide figures
 ```
 
-Results go to `OUT` (default `/Volumes/T9/results_ASPC_NEPC`). Set `ROOT` / `OUT`
-before sourcing to change locations. Step 02 writes one checkpoint per slide
-(`cells_raw_<slide>.rds`) and skips finished slides unless `FORCE_RERUN <- TRUE`.
+Results go to `OUT` (default `/Volumes/T9/Case Studies/multiplex_analysis_20261013_PDGFRA_v2`).
+Set `ROOT` / `OUT` in R (or `OUT` in the environment for `run_02_parallel.sh`) to change locations.
+Population rules only affect 03 and 04, so they can be re-run on an existing
+`cells_raw.rds` in a few minutes.
 
-| Script | What it does |
-|---|---|
-| `00_config.R` | slide table (single source of truth), dependency checks |
-| `01_channels.R` | channel map from OME-XML, pixel size, DAPI registration check |
-| `02_segment_measure.R` | slide tissue mask, tiled nuclear segmentation with halo, nuclear / 4-6-8 µm ring features after matched-control subtraction |
-| `03_classify.R` | per-slide robust gates, blank false-positive audit, population calls |
-| `04_abundance_proximity.R` | densities per mm² tissue, proximity vs permutation null, 50 µm ASPC neighbourhood |
-| `05_visualize.R` | marker overview, cell-type map, ASPC neighbourhood map, hotspot crops, composition charts, per-cell CSV for QuPath/napari |
+## Outputs of 04
 
-## Outputs (per slide, `OUT/plots/per_slide/<slide>/`)
+- Main analysis: `population_*`, `stroma_*`, `spatial_bin_*`, `hypothesis_summary.csv`;
+  figures `plots/04_*.pdf`.
+- Exploratory CEBPD split: the same analyses with the `exploratory_` prefix; figures
+  `plots/04x_exploratory_*.pdf`.
+- `plots/04_figures.pdf` collects every figure. Box plots use square panels of the same size.
 
-`_A_marker_overview.png`, `_B_celltype_map.png`, `_C_aspc_neighbourhood.png`,
-`_D_hotspot_<k>.png`, `_E_nbhd_composition.png`, `cells_<slide>.csv`.
-All figures are also collected in `OUT/plots/05_all_slides.pdf`.
+## Notes
 
-## Known caveats
-
-- The panel stains PDGFa (ligand), not PDGFRA.
-- PDGFa is called positive at a rate close to its matched negative-control
-  channel on most slides (`qc_marker_usability_primary_6um.csv`); treat ASPC
-  counts as provisional.
-- PM0 T32 was stained without blocking and with different cycle 6/7
-  secondaries than the other slides; its PDGFa/CEBPg positivity is not
-  comparable.
-- Some DLL3 calls in adenocarcinomas fall on cells autofluorescent in both
-  TRITC channels.
-- With three slides per group, group comparisons are descriptive only.
+- `05_visualize.R` has not been updated. It expects the earlier ASPC outputs
+  (`cells_spatial.rds`, `aspc_neighbourhood_composition.csv`) and does not run on
+  the outputs of this version of 04.
+- Slides: NEPC PM0T32 (2026-10-02 re-stain), PM677_A8, PM12_B3; ADENO PM1024_B, PM423, PM159T5.
+- With three slides per group, group comparisons are descriptive only (minimum
+  two-sided Wilcoxon p = 0.1).
