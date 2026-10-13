@@ -8,28 +8,25 @@
 options(java.parameters = "-Xmx24g")
 
 ## ---------------------------------------------------------------- PATHS -----
-## Both can be overridden before source(); OUT is absolute so every script
-## writes to the same place regardless of the R working directory.
 if (!exists("ROOT")) ROOT <- "/Volumes/T9/Case Studies"
-if (!exists("OUT"))  OUT  <- "/Volumes/T9/results_ASPC_NEPC"
+if (!exists("OUT")) OUT <- "/Volumes/T9/Case Studies/multiplex_analysis_20261013_PDGFRA_v2"
 dir.create(OUT, showWarnings = FALSE, recursive = TRUE)
 
 ## ------------------------------------------------------------ PARAMETERS ----
-## Pixel size, tile size and analysis radii are NOT set here: pixel size is
-## read from OME metadata in 01 (0.28 um/px on this cohort), tile size is owned
-## by 02, and spatial radii by 04. Setting them here previously leaked stale
-## values (PX_UM 0.23, TILE_SIZE 4096) into later scripts sourced in-session.
+PX_UM     <- 0.23    # <-- VERIFY from OME metadata. All µm results depend on this.
+TILE_SIZE <- 4096    # tile edge (px); 12.5x12.5 mm is far too large for RAM
+COFACTOR  <- 5       # arcsinh cofactor
+PROX_UM   <- 30      # "interaction" radius for proximity fraction
+N_PERM     <- 200    # permutations for density-corrected proximity test
 
-## Antibody caveat: the protocol stains PDGFa (LIGAND, CST 5241T),
-## NOT PDGFRA (receptor). ASPC definition uses the channel actually stained.
-PDGF_IS_LIGAND <- TRUE
+## Antibodies: PDGFRA (receptor, CST 5241T) and CEBPD. COMET files called
+## these channels "PDGFa" and "CEBPg" until corrected on 2026-10-12.
 
 ## Reader backend:
 ##   "auto"       -> try RBioFormats (Java); fall back to tifffile (Python)
 ##   "bioformats" -> force RBioFormats
 ##   "tifffile"   -> force Python tifffile (no Java needed)
-READER <- "tifffile"   # rJava/RBioFormats are not installed on this machine
-PY_ENV <- "r-reticulate"
+READER <- "auto"
 
 ## Install anything missing without prompting?
 AUTO_INSTALL <- TRUE
@@ -53,15 +50,15 @@ AUTO_INSTALL <- TRUE
 }
 
 ## core (always required)
-.ensure(c("xml2","dplyr","tidyr","purrr","tibble","ggplot2","MASS","RANN"))
+.ensure(c("xml2","dplyr","tidyr","purrr","tibble","FNN","ggplot2"))
 .ensure("EBImage", bioc = TRUE)
 
 .core_ok <- all(vapply(c("xml2","dplyr","tidyr","purrr","tibble",
-                         "ggplot2","MASS","RANN","EBImage"),
+                         "FNN","ggplot2","EBImage"),
                        requireNamespace, logical(1), quietly = TRUE))
 if (!.core_ok)
   stop("Core packages failed to install. Install manually:\n",
-       '  install.packages(c("xml2","dplyr","tidyr","purrr","tibble","ggplot2","MASS","RANN"))\n',
+       '  install.packages(c("xml2","dplyr","tidyr","purrr","tibble","FNN","ggplot2"))\n',
        '  BiocManager::install("EBImage")', call. = FALSE)
 
 ## ------------------------------------------------------ READER SELECTION ----
@@ -77,7 +74,6 @@ if (!.core_ok)
 .try_tifffile <- function() {
   .ensure("reticulate")
   if (!requireNamespace("reticulate", quietly = TRUE)) return(FALSE)
-  try(reticulate::use_virtualenv(PY_ENV, required = TRUE), silent = TRUE)
   ok <- tryCatch({ reticulate::import("tifffile"); TRUE }, error = function(e) FALSE)
   if (!ok) ok <- tryCatch({
     reticulate::py_install(c("tifffile","numpy","imagecodecs"))
@@ -109,7 +105,7 @@ READER_ACTIVE <- switch(
 suppressPackageStartupMessages({
   library(EBImage); library(xml2)
   library(dplyr); library(tidyr); library(purrr); library(tibble)
-  library(ggplot2)
+  library(FNN); library(ggplot2)
   if (READER_ACTIVE == "bioformats") { library(rJava); library(RBioFormats) }
   else                                library(reticulate)
 })
@@ -120,13 +116,13 @@ message("Reader backend active: ", READER_ACTIVE)
 ##   All slides: 8-cycle protocol, negative controls (AR/DLL3 = Cycle 6)
 ##   Negative-control pairing (species/fluorophore matched):
 ##     Cycle 5 (anti-Mouse647 / anti-Rabbit555) -> controls Cycle 6 (AR, DLL3)
-##     Cycle 3 (anti-Mouse555 / anti-Rabbit647) -> controls Cycle 7 (panCK, PDGFa)
+##     Cycle 3 (anti-Mouse555 / anti-Rabbit647) -> controls Cycle 7 (panCK, PDGFRA)
 slides <- tribble(
   ~slide_id,  ~group,           ~stainer, ~run,       ~comet_sw, ~n_cycles, ~has_negctrl, ~runtime_min, ~dir, ~file,
 
-  "PM0T32",   "NEPC",           1L, "20260826", "1.5.0.0", 8L, TRUE, NA_integer_,
-    "20260826_155725_1_ybucNp_JJ_full panel_PM0 T32",
-    "20260826_155725_1_ybucNp_JJ_full panel_PM0 T32.tiff",
+  "PM0T32",   "NEPC",           1L, "20261002", "1.6.1.0", 8L, TRUE, 811L,
+    "20261002_161511_1_INNdFn_JJ_full panel_PMO T32",
+    "20261002_161511_1_INNdFn_JJ_full panel_PMO T32.tiff",
 
   "PM677_A8", "NEPC",           1L, "20260608", "1.4.1.0", 8L, TRUE, 760L,
     "20260608_164617_1_ahXvmt_JJ_full panel_PM677 A8",
@@ -136,28 +132,28 @@ slides <- tribble(
     "20260608_164617_2_9ZdZ8V_JJ_full panel_PM12 B3",
     "20260608_164617_2_9ZdZ8V_JJ_full panel_PM12 B3.tiff",
 
-  "PM1024_B", "ADENO",          4L, "20260608", "1.4.1.0", 8L, TRUE, 799L,
+  "PM1024_B", "Adenocarcinoma", 4L, "20260608", "1.4.1.0", 8L, TRUE, 799L,
     "20260608_164617_4_CA2z2F_JJ_full panel_PM1024 B",
     "20260608_164617_4_CA2z2F_JJ_full panel_PM1024 B.tiff",
 
-  "PM423",    "ADENO",          2L, "20260625", "1.5.0.0", 8L, TRUE, 500L,
+  "PM423",    "Adenocarcinoma", 2L, "20260625", "1.5.0.0", 8L, TRUE, 500L,
     "20260625_131559_2_ZxKUqB_JJ_full panel_PM423",
     "20260625_131559_2_ZxKUqB_JJ_full panel_PM423.tiff",
 
-  "PM159T5",  "ADENO",          3L, "20260625", "1.5.0.0", 8L, TRUE, 529L,
+  "PM159T5",  "Adenocarcinoma", 3L, "20260625", "1.5.0.0", 8L, TRUE, 529L,
     "20260625_131600_3_VHgSnt_JJ_full panel_PM159T5",
     "20260625_131600_3_VHgSnt_JJ_full panel_PM159T5.tiff"
 ) |>
   mutate(
     tiff  = file.path(ROOT, dir, file),
     xml   = file.path(ROOT, dir, "jobfile.xml"),
-    group = factor(group, levels = c("ADENO", "NEPC")),
+    group = factor(group, levels = c("Adenocarcinoma", "NEPC")),
 
     ## protocol-dependent cycle indices
     cyc_AR_DLL3  = if_else(n_cycles == 6L, 4L, 6L),
-    cyc_CK_PDGF  = if_else(n_cycles == 6L, 5L, 7L),
+    cyc_CK_PDGFRA  = if_else(n_cycles == 6L, 5L, 7L),
     ctrl_AR_DLL3 = if_else(has_negctrl, 5L, NA_integer_),
-    ctrl_CK_PDGF = if_else(has_negctrl, 3L, NA_integer_),
+    ctrl_CK_PDGFRA = if_else(has_negctrl, 3L, NA_integer_),
 
     ## analysis tiers
     tier1 = TRUE,                 # all 6 slides, AF-only correction  (PRIMARY)
@@ -168,7 +164,7 @@ slides <- tribble(
 ## ------------------------------------------------------- FILE EXISTENCE -----
 .bad <- slides |>
   mutate(tiff_ok = file.exists(tiff), xml_ok = file.exists(xml)) |>
-  filter(!tiff_ok | !xml_ok)
+  filter(!tiff_ok)
 if (nrow(.bad)) {
   print(as.data.frame(.bad[, c("slide_id","tiff_ok","xml_ok","tiff")]))
   stop("Missing file(s) above -- check that the T9 volume is mounted.", call. = FALSE)
@@ -182,7 +178,7 @@ cat("\n--- group x stainer ---\n");         print(with(slides, table(group, stai
 cat("\n--- group x n_cycles ---\n");        print(with(slides, table(group, n_cycles)))
 
 .sw_nepc  <- unique(slides$comet_sw[slides$group == "NEPC"])
-.sw_adeno <- unique(slides$comet_sw[slides$group == "ADENO"])
+.sw_adeno <- unique(slides$comet_sw[slides$group == "Adenocarcinoma"])
 if (!setequal(.sw_nepc, .sw_adeno))
   warning("COMET software version differs between groups. Rely on Tier 3 ",
           "(20260608 within-batch) as the technical control.", call. = FALSE)
@@ -192,11 +188,6 @@ if (any(!slides$has_negctrl))
           "correction on ALL slides for comparability; Tier 2 drops them.",
           call. = FALSE)
 
-if (PDGF_IS_LIGAND)
-  message("\nNOTE: panel stains PDGFa (ligand, CST 5241T), not PDGFRA (receptor). ",
-          "ASPC is called as PDGFa+ (03_classify.R); CEBPg splits ASPC into ",
-          "CEBPg+ / CEBPg- subsets and panCK is not used to exclude ASPC.")
-
 ## ------------------------------------------------------------ SAVE ---------
 attr(slides, "reader") <- READER_ACTIVE
 saveRDS(slides, file.path(OUT, "slides_final.rds"))
@@ -204,7 +195,7 @@ saveRDS(slides, file.path(OUT, "slides_final.rds"))
 cat("\n--- slide table ---\n")
 print(as.data.frame(slides[, c("slide_id","group","stainer","run","comet_sw",
                                "n_cycles","has_negctrl","cyc_AR_DLL3",
-                               "ctrl_AR_DLL3","ctrl_CK_PDGF","tier2","tier3")]))
+                               "ctrl_AR_DLL3","ctrl_CK_PDGFRA","tier2","tier3")]))
 cat("\nTier 1 (primary, AF-only): ", sum(slides$tier1), " slides\n",
     "Tier 2 (neg-control corr): ", sum(slides$tier2), " slides\n",
     "Tier 3 (within-batch)    : ", sum(slides$tier3), " slides\n", sep = "")

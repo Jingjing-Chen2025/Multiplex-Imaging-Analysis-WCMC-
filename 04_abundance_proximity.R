@@ -1,30 +1,59 @@
 ###############################################################################
-# 04_abundance_proximity.R  v11.7
+# 04_abundance_proximity.R  v11.4-compatible
 #
 # PURPOSE
-#   Quantify ASPC-like stromal-cell abundance and spatial relationships to
-#   epithelial and neuroendocrine tumour populations using outputs from
-#   03_classify.R v11.4+.
+#   Quantify PDGFRA+ stromal-cell abundance and spatial relationships to AR+
+#   epithelial (EPI_CA1 FOLH1+, EPI_CA2 FOLH1-) and neuroendocrine (NE_CA)
+#   tumour-cell populations. The same analyses are repeated, as exploratory
+#   outputs (exploratory_* files, 04x_* figures), for PDGFRA+ split by CEBPD.
 #
-# v11.7 CHANGE
-#   - Removes slide-level marker-usability suppression from 04.
-#   - Uses final cell-level calls written by 03_classify.R:
-#        ASPC, EPI_CA, NE_CA
-#     which are based on pixel-level corrected marker measurements.
-#   - Keeps blank-derived calls:
-#        ASPC_blank, EPI_CA_blank, NE_CA_blank
-#     as audit/QC outputs only.
-#   - Does not remove or suppress ASPC based on mean(PDGF_blank_pos).
-#   - Keeps ASPC_raw / ASPC_not_callable columns if present for backwards
-#     compatibility and audit, but final spatial/abundance analyses use ASPC.
+# v11.4 CHANGE
+#   PM0T32 re-acquired 20260826 on the standard 8-cycle protocol WITH
+#   secondary-only negative controls (AR/DLL3 = Cycle 6). It is no longer a
+#   protocol variant, so all six slides now carry the full blank-subtracted
+#   feature set and the blank false-positive controls are defined for every
+#   slide. MANIFEST path updated accordingly.
+#
+# v11.3 CHANGE (retained)
+#   Relaxed filters so all slides present in cells_classified.rds are included
+#   in abundance, spatial-bin rho, proximity, neighbourhood, and spatial-map
+#   outputs. Original tier2/tier3 annotations are retained as QC labels but do
+#   not exclude slides by default.
 #
 # INPUT
-#   results_ASPC_NEPC/cells_classified.rds
-#   results_ASPC_NEPC/channels.rds
+#   OUT/cells_classified.rds
+#   OUT/channels.rds
 #
-# OUTPUTS
-#   CSV summaries in OUT
-#   PDF figures in OUT/plots
+# POPULATIONS (2026-10-13)
+#   PDGFRA  = PDGFRA_pos                                 (main)
+#   PDGFRA_CEBPDpos = PDGFRA_pos & CEBPD_pos             (exploratory)
+#   PDGFRA_CEBPDneg = PDGFRA_pos & !CEBPD_pos            (exploratory)
+#   EPI_CA1 = AR_pos & FOLH1_pos & panCK_pos
+#   EPI_CA2 = AR_pos & !FOLH1_pos & panCK_pos
+#   NE_CA   = DLL3_pos
+#
+# OUTPUT
+#   (exploratory_* versions of the population/stroma/spatial/hypothesis files)
+#   population_abundance.csv
+#   population_abundance_tests.csv
+#   population_blank_false_positive_controls.csv
+#   population_blank_adjusted_enrichment.csv
+#   population_blank_adjusted_enrichment_tests.csv
+#   spatial_bin_counts.csv
+#   spatial_bin_correlations.csv
+#   spatial_bin_correlation_tests.csv
+#   stroma_proximity_perslide.csv
+#   stroma_proximity_group_tests.csv
+#   stroma_neighbourhood.csv
+#   hypothesis_summary.csv
+#   slide_qc_summary_v11_3_all_slides.csv
+#   plots/04_figures.pdf and individual PDFs
+#
+# STATISTICAL NOTE
+#   Unit of replication = slide/patient.
+#   With n = 3 vs 3 at best, the minimum two-sided Wilcoxon p-value is 0.1.
+#   Cell-level p-values are deliberately not computed because they would be
+#   pseudoreplication.
 ###############################################################################
 
 suppressPackageStartupMessages({
@@ -36,58 +65,41 @@ suppressPackageStartupMessages({
 })
 
 ###############################################################################
-## NAMESPACE SAFETY
-###############################################################################
-
-## Avoid namespace conflicts after sourcing 02_segment_measure.R, which loads MASS.
-filter     <- dplyr::filter
-select     <- dplyr::select
-mutate     <- dplyr::mutate
-summarise  <- dplyr::summarise
-group_by   <- dplyr::group_by
-ungroup    <- dplyr::ungroup
-left_join  <- dplyr::left_join
-transmute  <- dplyr::transmute
-distinct   <- dplyr::distinct
-count      <- dplyr::count
-case_when  <- dplyr::case_when
-any_of     <- dplyr::any_of
-first      <- dplyr::first
-bind_rows  <- dplyr::bind_rows
-
-###############################################################################
 ## USER SETTINGS
 ###############################################################################
 
-if (!exists("OUT")) OUT <- "/Volumes/T9/results_ASPC_NEPC"
-
+if (!exists("OUT")) OUT <- "/Volumes/T9/Case Studies/multiplex_analysis_20261013_PDGFRA_v2"
 PLOTDIR <- file.path(OUT, "plots")
-dir.create(PLOTDIR, showWarnings = FALSE, recursive = TRUE)
 
-if (!exists("USE_ALL_SLIDES_FOR_ANALYSIS")) USE_ALL_SLIDES_FOR_ANALYSIS <- TRUE
-if (!exists("MAP_INCLUDE_OTHER")) MAP_INCLUDE_OTHER <- TRUE
+## v11.3 default: include all slides present in cells_classified.rds.
+## Set FALSE to restore tier2/tier3 QC-filtered behaviour.
+USE_ALL_SLIDES_FOR_ANALYSIS <- TRUE
 
-## Keep these display/audit categories if they exist.
-if (!exists("MAP_SHOW_NOT_CALLABLE")) MAP_SHOW_NOT_CALLABLE <- TRUE
+## Include Other cells in grey in spatial maps so every available slide appears.
+MAP_INCLUDE_OTHER <- TRUE
 
-if (!exists("MIN_N")) MIN_N <- 20L
-if (!exists("N_PERM")) N_PERM <- 199L
+## Spatial analysis settings.
+MIN_N  <- 20
+N_PERM <- 199
 
-if (!exists("BIN_UM")) BIN_UM <- 250
-if (!exists("MIN_BINS_FOR_RHO")) MIN_BINS_FOR_RHO <- 10L
-if (!exists("MIN_TOTAL_CELLS_FOR_RHO")) MIN_TOTAL_CELLS_FOR_RHO <- 20L
+## Spatial-bin rho settings.
+BIN_UM <- 250
+MIN_BINS_FOR_RHO <- 10
+MIN_TOTAL_CELLS_FOR_RHO <- 20
 
-if (!exists("RADIUS_UM")) RADIUS_UM <- 50
+## Stromal-cell-centred neighbourhood radius.
+RADIUS_UM <- 50
 
 set.seed(1)
+dir.create(PLOTDIR, showWarnings = FALSE, recursive = TRUE)
 
 PDF_DEV <- if (capabilities("cairo")) grDevices::cairo_pdf else grDevices::pdf
 
 save_pdf <- function(p, file, width = 10, height = 6) {
   ok <- tryCatch({
-    ggplot2::ggsave(
-      filename = file.path(PLOTDIR, file),
-      plot = p,
+    ggsave(
+      file.path(PLOTDIR, file),
+      p,
       device = PDF_DEV,
       width = width,
       height = height,
@@ -95,7 +107,11 @@ save_pdf <- function(p, file, width = 10, height = 6) {
     )
     TRUE
   }, error = function(e) {
-    warning("figure '", file, "' failed: ", conditionMessage(e), call. = FALSE)
+    warning(
+      "figure '", file, "' failed: ",
+      conditionMessage(e),
+      call. = FALSE
+    )
     FALSE
   })
 
@@ -105,6 +121,15 @@ save_pdf <- function(p, file, width = 10, height = 6) {
 
 .figs <- list()
 
+## Box/point plots share one panel shape: square panels of PANEL_IN inches,
+## with the PDF sized from the facet layout, so the y axis has the same length
+## in every figure.
+PANEL_IN <- 2.6
+BOX_THEME <- theme(aspect.ratio = 1)
+
+fig_w <- function(ncol) ncol * (PANEL_IN + 0.35) + 1.4
+fig_h <- function(nrow, aspect = 1) nrow * (PANEL_IN * aspect + 0.45) + 1.3
+
 keep_fig <- function(p, w = 10, h = 6) {
   .figs[[length(.figs) + 1]] <<- list(plot = p, w = w, h = h)
   invisible(p)
@@ -113,47 +138,247 @@ keep_fig <- function(p, w = 10, h = 6) {
 ###############################################################################
 ## SLIDE MANIFEST
 ###############################################################################
+## All six slides now share the 8-cycle protocol with secondary-only negative
+## controls (AR/DLL3 = Cycle 6). The tiff paths are recorded here for
+## provenance only; this script reads cells_classified.rds, not the images.
 
-## Slide table is owned by 00_config.R.
-.sf <- readRDS(file.path(OUT, "slides_final.rds"))
+if (!exists("ROOT")) ROOT <- "/Volumes/T9/Case Studies"
+
 MANIFEST <- data.frame(
-  slide_id = .sf$slide_id,
-  group = as.character(.sf$group),
-  tiff = .sf$tiff,
+  slide_id = c(
+    "PM0T32", "PM677_A8", "PM12_B3",
+    "PM1024_B", "PM423", "PM159T5"
+  ),
+  group = c(
+    "NEPC", "NEPC", "NEPC",
+    "ADENO", "ADENO", "ADENO"
+  ),
+  tiff = file.path(ROOT, c(
+    "20261002_161511_1_INNdFn_JJ_full panel_PMO T32/20261002_161511_1_INNdFn_JJ_full panel_PMO T32.tiff",
+    "20260608_164617_1_ahXvmt_JJ_full panel_PM677 A8/20260608_164617_1_ahXvmt_JJ_full panel_PM677 A8.tiff",
+    "20260608_164617_2_9ZdZ8V_JJ_full panel_PM12 B3/20260608_164617_2_9ZdZ8V_JJ_full panel_PM12 B3.tiff",
+    "20260608_164617_4_CA2z2F_JJ_full panel_PM1024 B/20260608_164617_4_CA2z2F_JJ_full panel_PM1024 B.tiff",
+    "20260625_131559_2_ZxKUqB_JJ_full panel_PM423/20260625_131559_2_ZxKUqB_JJ_full panel_PM423.tiff",
+    "20260625_131600_3_VHgSnt_JJ_full panel_PM159T5/20260625_131600_3_VHgSnt_JJ_full panel_PM159T5.tiff"
+  )),
   stringsAsFactors = FALSE
 )
 
 GROUPS <- c("ADENO", "NEPC")
 
 ###############################################################################
-## HELPERS
+## LOAD INPUTS
 ###############################################################################
 
-.bool <- function(x) {
-  y <- x %in% TRUE
-  y[is.na(y)] <- FALSE
-  y
+cells_file <- file.path(OUT, "cells_classified.rds")
+channels_file <- file.path(OUT, "channels.rds")
+
+if (!file.exists(cells_file)) {
+  stop("Run 03_classify.R v11.1+ first: missing cells_classified.rds.", call. = FALSE)
 }
 
-.finite <- function(x) {
-  x <- as.numeric(x)
-  x[is.finite(x)]
+if (!file.exists(channels_file)) {
+  stop("Missing channels.rds. Re-run 01_channels.R.", call. = FALSE)
 }
 
-.median_or_na <- function(x) {
-  x <- .finite(x)
-  if (!length(x)) return(NA_real_)
-  median(x, na.rm = TRUE)
+cells <- readRDS(cells_file)
+
+if (!nrow(cells)) {
+  stop("cells_classified.rds has zero rows.", call. = FALSE)
 }
 
-.qsafe <- function(x, p, default = NA_real_) {
-  x <- .finite(x)
-  if (!length(x)) return(default)
-  as.numeric(stats::quantile(x, p, na.rm = TRUE, names = FALSE))
+z <- readRDS(channels_file)
+PX_UM <- if (!is.null(z$px_um)) z$px_um else 12500 / 44643
+
+present <- intersect(MANIFEST$slide_id, unique(cells$slide_id))
+absent  <- setdiff(MANIFEST$slide_id, unique(cells$slide_id))
+
+if (length(absent)) {
+  warning(
+    "No cells for: ",
+    paste(absent, collapse = ", "),
+    " -- excluded because they are absent from cells_classified.rds.",
+    call. = FALSE
+  )
 }
 
-.safe_sum <- function(x) sum(.bool(x), na.rm = TRUE)
-.safe_mean <- function(x) mean(.bool(x), na.rm = TRUE)
+## Freshness guard: every slide should now carry negative controls. A stale
+## PM0T32 from the retired 6-cycle acquisition would have has_negctrl = FALSE
+## and would make the blank-adjusted sections below meaningless for that slide.
+if ("has_negctrl" %in% names(cells)) {
+  .no_nc <- unique(cells$slide_id[!cells$has_negctrl])
+  if (length(.no_nc)) {
+    warning(
+      "Slide(s) without negative controls in cells_classified.rds: ",
+      paste(.no_nc, collapse = ", "),
+      " -- blank-adjusted metrics are not interpretable for these. ",
+      "Re-run 01-03 against the current acquisitions.",
+      call. = FALSE
+    )
+  }
+}
+
+cells <- cells |>
+  filter(slide_id %in% present) |>
+  select(-any_of("group")) |>
+  left_join(MANIFEST[, c("slide_id", "group")], by = "slide_id") |>
+  mutate(group = factor(group, levels = GROUPS))
+
+###############################################################################
+## POPULATION DEFINITIONS
+###############################################################################
+
+required_gates <- paste0(
+  c("CEBPD", "PDGFRA", "AR", "FOLH1", "panCK", "DLL3"),
+  "_pos"
+)
+
+missing_gates <- setdiff(required_gates, names(cells))
+
+if (length(missing_gates)) {
+  stop(
+    "Missing gates required for population logic: ",
+    paste(missing_gates, collapse = ", "),
+    call. = FALSE
+  )
+}
+
+## Population definitions (2026-10-13, PDGFRA run).
+## PDGFRA+ is the main stromal population; the CEBPD+/- split is exploratory.
+TUMOUR_POPS <- c("EPI_CA1", "EPI_CA2", "NE_CA")
+SPLIT_POPS  <- c("PDGFRA_CEBPDpos", "PDGFRA_CEBPDneg")
+POPS        <- c("PDGFRA", TUMOUR_POPS)
+
+## Expected direction of each population's abundance in NEPC vs ADENO.
+POP_DIRECTION <- c(
+  PDGFRA = "higher_in_NEPC",
+  PDGFRA_CEBPDpos = "higher_in_NEPC",
+  PDGFRA_CEBPDneg = "higher_in_NEPC",
+  EPI_CA1 = "lower_in_NEPC",
+  EPI_CA2 = "lower_in_NEPC",
+  NE_CA = "higher_in_NEPC"
+)
+
+cells <- cells |>
+  mutate(
+    PDGFRA          = PDGFRA_pos,
+    PDGFRA_CEBPDpos = PDGFRA_pos & CEBPD_pos,
+    PDGFRA_CEBPDneg = PDGFRA_pos & !CEBPD_pos,
+    EPI_CA1         = AR_pos & FOLH1_pos & panCK_pos,
+    EPI_CA2         = AR_pos & !FOLH1_pos & panCK_pos,
+    NE_CA           = DLL3_pos
+  )
+
+## Blank false-positive population controls: same gates on the matched
+## secondary-only channels ("-" gates included).
+if (all(paste0(c("PDGFRA", "CEBPD", "panCK", "FOLH1", "AR", "DLL3"),
+               "_blank_pos") %in% names(cells))) {
+  cells <- cells |>
+    mutate(
+      PDGFRA_blank          = PDGFRA_blank_pos,
+      PDGFRA_CEBPDpos_blank = PDGFRA_blank_pos & CEBPD_blank_pos,
+      PDGFRA_CEBPDneg_blank = PDGFRA_blank_pos & !CEBPD_blank_pos,
+      EPI_CA1_blank         = AR_blank_pos & FOLH1_blank_pos & panCK_blank_pos,
+      EPI_CA2_blank         = AR_blank_pos & !FOLH1_blank_pos & panCK_blank_pos,
+      NE_CA_blank           = DLL3_blank_pos
+    )
+} else {
+  warning(
+    "Blank false-positive gate columns not all present; blank controls set to NA.",
+    call. = FALSE
+  )
+  for (p in c(POPS, SPLIT_POPS)) cells[[paste0(p, "_blank")]] <- NA
+}
+
+## Plotting labels. Overlapping calls (stromal and tumour gates both met) are
+## labelled Multi. pop_split is the same label with PDGFRA replaced by its
+## CEBPD+/- subset, used only by the exploratory analyses.
+cells$n_pop_flags <- rowSums(as.matrix(as.data.frame(cells)[, POPS]), na.rm = TRUE)
+cells$multi_pop <- cells$n_pop_flags > 1
+cells$pop <- "Other"
+for (p in POPS) cells$pop[as.data.frame(cells)[[p]] %in% TRUE] <- p
+cells$pop[cells$multi_pop] <- "Multi"
+cells$pop_split <- cells$pop
+cells$pop_split[cells$pop == "PDGFRA" & cells$CEBPD_pos %in% TRUE] <- "PDGFRA_CEBPDpos"
+cells$pop_split[cells$pop == "PDGFRA" & !(cells$CEBPD_pos %in% TRUE)] <- "PDGFRA_CEBPDneg"
+
+###############################################################################
+## ANALYSIS INCLUSION
+###############################################################################
+
+all_present_slides <- sort(unique(cells$slide_id))
+
+tier2_flagged <- if ("tier2" %in% names(cells)) {
+  unique(cells$slide_id[cells$tier2 %in% c(TRUE, "TRUE", 1)])
+} else {
+  all_present_slides
+}
+
+tier3_flagged <- if ("tier3" %in% names(cells)) {
+  unique(cells$slide_id[cells$tier3 %in% c(TRUE, "TRUE", 1)])
+} else {
+  all_present_slides
+}
+
+if (USE_ALL_SLIDES_FOR_ANALYSIS) {
+  tier2_ok <- all_present_slides
+  tier3_ok <- all_present_slides
+} else {
+  tier2_ok <- tier2_flagged
+  tier3_ok <- tier3_flagged
+}
+
+nslide <- cells |>
+  distinct(slide_id, group) |>
+  count(group, .drop = FALSE)
+
+slide_qc_summary <- cells |>
+  group_by(slide_id, group) |>
+  summarise(
+    n_cells = n(),
+    tier2 = if ("tier2" %in% names(cells)) unique(tier2)[1] else TRUE,
+    tier3 = if ("tier3" %in% names(cells)) unique(tier3)[1] else TRUE,
+    n_PDGFRA = sum(PDGFRA, na.rm = TRUE),
+    n_PDGFRA_CEBPDpos = sum(PDGFRA_CEBPDpos, na.rm = TRUE),
+    n_PDGFRA_CEBPDneg = sum(PDGFRA_CEBPDneg, na.rm = TRUE),
+    n_EPI_CA1 = sum(EPI_CA1, na.rm = TRUE),
+    n_EPI_CA2 = sum(EPI_CA2, na.rm = TRUE),
+    n_NE_CA = sum(NE_CA, na.rm = TRUE),
+    n_Multi = sum(multi_pop, na.rm = TRUE),
+    n_Other = sum(pop == "Other", na.rm = TRUE),
+    n_non_other = sum(pop != "Other", na.rm = TRUE),
+    .groups = "drop"
+  )
+
+cat("\nSlides analysed:\n")
+print(as.data.frame(nslide))
+
+cat("\nSlide inclusion mode:\n")
+cat("  USE_ALL_SLIDES_FOR_ANALYSIS = ", USE_ALL_SLIDES_FOR_ANALYSIS, "\n", sep = "")
+cat("  slides used for abundance/tier2 analyses: ", paste(tier2_ok, collapse = ", "), "\n")
+cat("  slides used for spatial/tier3 analyses:   ", paste(tier3_ok, collapse = ", "), "\n")
+cat("\nOriginal tier2-flagged slides: ", paste(tier2_flagged, collapse = ", "), "\n")
+cat("Original tier3-flagged slides: ", paste(tier3_flagged, collapse = ", "), "\n")
+
+cat("\nSlide QC summary:\n")
+print(as.data.frame(slide_qc_summary))
+
+write.csv(
+  slide_qc_summary,
+  file.path(OUT, "slide_qc_summary_v11_3_all_slides.csv"),
+  row.names = FALSE
+)
+
+if (any(nslide$n < 2)) {
+  warning(
+    "A group has <2 slides -- no test is possible; effect sizes only.",
+    call. = FALSE
+  )
+}
+
+###############################################################################
+## SLIDE-LEVEL COMPARISON HELPER
+###############################################################################
 
 cmp <- function(d, valcol, label,
                 direction = c("lower_in_NEPC", "higher_in_NEPC")) {
@@ -177,17 +402,20 @@ cmp <- function(d, valcol, label,
   if (!valcol %in% names(d) || !nrow(d)) return(blank)
 
   gs <- split(d[[valcol]], factor(d$group, levels = GROUPS))
+
   A <- gs$ADENO[is.finite(gs$ADENO)]
   N <- gs$NEPC[is.finite(gs$NEPC)]
 
   nA <- length(A)
   nN <- length(N)
+
   mA <- if (nA) median(A) else NA_real_
   mN <- if (nN) median(N) else NA_real_
+
   hl <- if (nA && nN) median(outer(N, A, "-")) else NA_real_
 
   p <- if (nA >= 2 && nN >= 2) {
-    signif(suppressWarnings(stats::wilcox.test(A, N))$p.value, 3)
+    signif(suppressWarnings(wilcox.test(A, N))$p.value, 3)
   } else {
     NA_real_
   }
@@ -216,270 +444,30 @@ cmp <- function(d, valcol, label,
   )
 }
 
-infer_tile_size <- function(d, default = 2048L) {
-  if (!all(c("tile_x", "tile_y") %in% names(d))) return(default)
+###############################################################################
+## AREA / TILE HELPERS
+###############################################################################
 
+infer_tile_size <- function(d, default = 2048L) {
   tx <- sort(unique(d$tile_x))
   ty <- sort(unique(d$tile_y))
-  step <- c(diff(tx)[diff(tx) > 0], diff(ty)[diff(ty) > 0])
+
+  dx <- diff(tx)
+  dy <- diff(ty)
+
+  step <- c(dx[dx > 0], dy[dy > 0])
   step <- step[is.finite(step)]
 
   if (!length(step)) return(default)
+
   as.integer(round(median(step)))
 }
-
-nn_med <- function(A, B) {
-  if (!nrow(A) || !nrow(B)) return(NA_real_)
-  median(RANN::nn2(B, A, k = 1)$nn.dists[, 1]) * PX_UM
-}
-
-###############################################################################
-## LOAD INPUTS
-###############################################################################
-
-cells_file <- file.path(OUT, "cells_classified.rds")
-channels_file <- file.path(OUT, "channels.rds")
-
-if (!file.exists(cells_file)) {
-  stop("Run 03_classify.R first: missing cells_classified.rds.", call. = FALSE)
-}
-
-if (!file.exists(channels_file)) {
-  stop("Missing channels.rds. Re-run 01_channels.R.", call. = FALSE)
-}
-
-cells <- readRDS(cells_file)
-
-if (!is.data.frame(cells) || !nrow(cells)) {
-  stop("cells_classified.rds has zero rows or is not a data.frame.", call. = FALSE)
-}
-
-z <- readRDS(channels_file)
-PX_UM <- if (!is.null(z$px_um)) z$px_um else 12500 / 44643
-
-required_base <- c("slide_id", "x_px", "y_px", "area", "tile_x", "tile_y")
-missing_base <- setdiff(required_base, names(cells))
-
-if (length(missing_base)) {
-  stop(
-    "cells_classified.rds is missing required column(s): ",
-    paste(missing_base, collapse = ", "),
-    call. = FALSE
-  )
-}
-
-present <- intersect(MANIFEST$slide_id, unique(cells$slide_id))
-absent  <- setdiff(MANIFEST$slide_id, unique(cells$slide_id))
-extra   <- setdiff(unique(cells$slide_id), MANIFEST$slide_id)
-
-if (length(absent)) {
-  warning(
-    "No cells for: ", paste(absent, collapse = ", "),
-    " -- excluded because they are absent from cells_classified.rds.",
-    call. = FALSE
-  )
-}
-
-if (length(extra)) {
-  warning(
-    "cells_classified.rds contains unexpected slide(s): ",
-    paste(extra, collapse = ", "),
-    " -- excluded from 04 analyses.",
-    call. = FALSE
-  )
-}
-
-if (!length(present)) {
-  stop("No manifest slides are present in cells_classified.rds.", call. = FALSE)
-}
-
-if ("has_negctrl" %in% names(cells)) {
-  .no_nc <- unique(cells$slide_id[!(cells$has_negctrl %in% TRUE)])
-  .no_nc <- .no_nc[!is.na(.no_nc)]
-
-  if (length(.no_nc)) {
-    warning(
-      "Slide(s) without negative controls in cells_classified.rds: ",
-      paste(.no_nc, collapse = ", "),
-      " -- blank-control audit metrics may be incomplete.",
-      call. = FALSE
-    )
-  }
-}
-
-cells <- cells |>
-  filter(slide_id %in% present) |>
-  select(-any_of("group")) |>
-  left_join(MANIFEST[, c("slide_id", "group")], by = "slide_id") |>
-  mutate(group = factor(group, levels = GROUPS))
-
-if (!"tier2" %in% names(cells)) cells$tier2 <- TRUE
-if (!"tier3" %in% names(cells)) cells$tier3 <- TRUE
-
-###############################################################################
-## POPULATION COLUMNS
-###############################################################################
-## 04 now trusts the final pixel-level corrected calls from 03.
-## Blank-derived calls are audit only.
-
-required_pop <- c("ASPC", "EPI_CA", "NE_CA")
-missing_pop <- setdiff(required_pop, names(cells))
-
-if (length(missing_pop)) {
-  stop(
-    "cells_classified.rds is missing final population column(s): ",
-    paste(missing_pop, collapse = ", "),
-    "\nRe-run updated 03_classify.R first.",
-    call. = FALSE
-  )
-}
-
-cells$ASPC  <- .bool(cells$ASPC)
-cells$EPI_CA <- .bool(cells$EPI_CA)
-cells$NE_CA  <- .bool(cells$NE_CA)
-
-## Backwards-compatible audit columns.
-if (!"ASPC_raw" %in% names(cells)) cells$ASPC_raw <- cells$ASPC
-if (!"EPI_CA_raw" %in% names(cells)) cells$EPI_CA_raw <- cells$EPI_CA
-if (!"NE_CA_raw" %in% names(cells)) cells$NE_CA_raw <- cells$NE_CA
-
-cells$ASPC_raw <- .bool(cells$ASPC_raw)
-cells$EPI_CA_raw <- .bool(cells$EPI_CA_raw)
-cells$NE_CA_raw <- .bool(cells$NE_CA_raw)
-
-if (!"ASPC_not_callable" %in% names(cells)) cells$ASPC_not_callable <- FALSE
-if (!"EPI_CA_not_callable" %in% names(cells)) cells$EPI_CA_not_callable <- FALSE
-if (!"NE_CA_not_callable" %in% names(cells)) cells$NE_CA_not_callable <- FALSE
-
-cells$ASPC_not_callable <- .bool(cells$ASPC_not_callable)
-cells$EPI_CA_not_callable <- .bool(cells$EPI_CA_not_callable)
-cells$NE_CA_not_callable <- .bool(cells$NE_CA_not_callable)
-
-if (!"ASPC_CEBPg_pos" %in% names(cells)) cells$ASPC_CEBPg_pos <- FALSE
-if (!"ASPC_CEBPg_neg" %in% names(cells)) cells$ASPC_CEBPg_neg <- cells$ASPC & !.bool(cells$ASPC_CEBPg_pos)
-
-cells$ASPC_CEBPg_pos <- .bool(cells$ASPC_CEBPg_pos)
-cells$ASPC_CEBPg_neg <- .bool(cells$ASPC_CEBPg_neg)
-
-if (!"ASPC_blank" %in% names(cells)) {
-  cells$ASPC_blank <- if ("PDGF_blank_pos" %in% names(cells)) .bool(cells$PDGF_blank_pos) else NA
-}
-
-if (!"EPI_CA_blank" %in% names(cells)) {
-  if (all(c("panCK_blank_pos", "FOLH1_blank_pos", "AR_blank_pos") %in% names(cells))) {
-    cells$EPI_CA_blank <- .bool(cells$panCK_blank_pos) &
-      (.bool(cells$FOLH1_blank_pos) | .bool(cells$AR_blank_pos))
-  } else {
-    cells$EPI_CA_blank <- NA
-  }
-}
-
-if (!"NE_CA_blank" %in% names(cells)) {
-  cells$NE_CA_blank <- if ("DLL3_blank_pos" %in% names(cells)) .bool(cells$DLL3_blank_pos) else NA
-}
-
-## Rebuild display label from final calls.
-cells <- cells |>
-  mutate(
-    n_pop_flags = rowSums(cbind(ASPC, EPI_CA, NE_CA), na.rm = TRUE),
-    multi_pop = n_pop_flags > 1,
-    pop = case_when(
-      multi_pop ~ "Multi",
-      ASPC ~ "ASPC",
-      NE_CA ~ "NE_CA",
-      EPI_CA ~ "EPI_CA",
-      MAP_SHOW_NOT_CALLABLE & ASPC_not_callable ~ "ASPC_not_callable",
-      MAP_SHOW_NOT_CALLABLE & EPI_CA_not_callable ~ "EPI_CA_not_callable",
-      MAP_SHOW_NOT_CALLABLE & NE_CA_not_callable ~ "NE_CA_not_callable",
-      TRUE ~ "Other"
-    )
-  )
-
-###############################################################################
-## ANALYSIS INCLUSION
-###############################################################################
-
-all_present_slides <- sort(unique(cells$slide_id))
-
-tier2_flagged <- unique(cells$slide_id[cells$tier2 %in% c(TRUE, "TRUE", 1)])
-tier3_flagged <- unique(cells$slide_id[cells$tier3 %in% c(TRUE, "TRUE", 1)])
-
-if (USE_ALL_SLIDES_FOR_ANALYSIS) {
-  tier2_ok <- all_present_slides
-  tier3_ok <- all_present_slides
-} else {
-  tier2_ok <- tier2_flagged
-  tier3_ok <- tier3_flagged
-}
-
-nslide <- cells |>
-  distinct(slide_id, group) |>
-  count(group, .drop = FALSE)
-
-slide_qc_summary <- cells |>
-  group_by(slide_id, group) |>
-  summarise(
-    n_cells = n(),
-    tier2 = first(tier2),
-    tier3 = first(tier3),
-
-    n_ASPC = sum(.data$ASPC, na.rm = TRUE),
-    n_ASPC_raw = sum(.data$ASPC_raw, na.rm = TRUE),
-    n_ASPC_not_callable = sum(.data$ASPC_not_callable, na.rm = TRUE),
-
-    n_EPI_CA = sum(.data$EPI_CA, na.rm = TRUE),
-    n_EPI_CA_raw = sum(.data$EPI_CA_raw, na.rm = TRUE),
-    n_EPI_CA_not_callable = sum(.data$EPI_CA_not_callable, na.rm = TRUE),
-
-    n_NE_CA = sum(.data$NE_CA, na.rm = TRUE),
-    n_NE_CA_raw = sum(.data$NE_CA_raw, na.rm = TRUE),
-    n_NE_CA_not_callable = sum(.data$NE_CA_not_callable, na.rm = TRUE),
-
-    n_Multi = sum(.data$multi_pop, na.rm = TRUE),
-    n_Other = sum(.data$pop == "Other", na.rm = TRUE),
-    n_non_other = sum(.data$pop != "Other", na.rm = TRUE),
-
-    frac_ASPC = mean(.data$ASPC, na.rm = TRUE),
-    frac_EPI_CA = mean(.data$EPI_CA, na.rm = TRUE),
-    frac_NE_CA = mean(.data$NE_CA, na.rm = TRUE),
-
-    frac_ASPC_blank = mean(.data$ASPC_blank, na.rm = TRUE),
-    frac_EPI_CA_blank = mean(.data$EPI_CA_blank, na.rm = TRUE),
-    frac_NE_CA_blank = mean(.data$NE_CA_blank, na.rm = TRUE),
-
-    .groups = "drop"
-  )
-
-cat("\nSlides analysed:\n")
-print(as.data.frame(nslide))
-
-cat("\nSlide inclusion mode:\n")
-cat("  USE_ALL_SLIDES_FOR_ANALYSIS = ", USE_ALL_SLIDES_FOR_ANALYSIS, "\n", sep = "")
-cat("  slides used for abundance/tier2 analyses: ", paste(tier2_ok, collapse = ", "), "\n")
-cat("  slides used for spatial/tier3 analyses:   ", paste(tier3_ok, collapse = ", "), "\n")
-
-cat("\nSlide QC / call summary:\n")
-print(as.data.frame(slide_qc_summary))
-
-write.csv(
-  slide_qc_summary,
-  file.path(OUT, "slide_qc_summary_v11_7_pixel_calls.csv"),
-  row.names = FALSE
-)
-
-if (any(nslide$n < 2)) {
-  warning("A group has <2 slides -- no test is possible; effect sizes only.", call. = FALSE)
-}
-
-###############################################################################
-## AREA / TILE METRICS
-###############################################################################
 
 tile_area_mm2_by_slide <- cells |>
   filter(slide_id %in% tier2_ok) |>
   group_by(slide_id) |>
   summarise(
-    inferred_tile_size_px = infer_tile_size(dplyr::pick(dplyr::everything())),
+    inferred_tile_size_px = infer_tile_size(cur_data_all()),
     n_cellbearing_tiles = n_distinct(paste(tile_x, tile_y)),
     cellbearing_tile_mm2 =
       n_cellbearing_tiles * inferred_tile_size_px^2 * PX_UM^2 / 1e6,
@@ -487,199 +475,171 @@ tile_area_mm2_by_slide <- cells |>
     .groups = "drop"
   )
 
-## Tissue area from the slide-level tissue mask written by 02 (preferred
-## denominator for densities; cell-bearing tile area over-counts tissue at
-## section edges).
-tissue_area_file <- file.path(OUT, "tissue_area_by_slide.csv")
-if (file.exists(tissue_area_file)) {
-  tile_area_mm2_by_slide <- left_join(
-    tile_area_mm2_by_slide,
-    read.csv(tissue_area_file, stringsAsFactors = FALSE)[, c("slide_id", "tissue_mm2")],
-    by = "slide_id"
-  )
-} else {
-  tile_area_mm2_by_slide$tissue_mm2 <- tile_area_mm2_by_slide$cellbearing_tile_mm2
+###############################################################################
+## ANALYSES 1-6 ARE RUN TWICE:
+##   main:        PDGFRA+ stroma                     (unprefixed files, 04_* figures)
+##   exploratory: PDGFRA+ split by CEBPD+ / CEBPD-   (exploratory_* files, 04x_* figures)
+###############################################################################
+
+run_set <- function(STROMA_POPS, LABCOL, PFX, FPFX, DEF_TEXT, CAPTION = NULL) {
+POPS <- c(STROMA_POPS, TUMOUR_POPS)
+if (!is.null(CAPTION)) {
+  .save_pdf <- save_pdf
+  .keep_fig <- keep_fig
+  save_pdf <- function(p, ...) .save_pdf(p + labs(caption = CAPTION), ...)
+  keep_fig <- function(p, ...) .keep_fig(p + labs(caption = CAPTION), ...)
 }
 
-write.csv(
-  tile_area_mm2_by_slide,
-  file.path(OUT, "cellbearing_tile_area_by_slide.csv"),
-  row.names = FALSE
-)
-
 ###############################################################################
-## 1. ASPC ABUNDANCE
+## 1. POPULATION ABUNDANCE
 ###############################################################################
 
-ab_slide <- cells |>
-  filter(slide_id %in% tier2_ok) |>
-  group_by(slide_id, group) |>
-  summarise(
-    n_cells = n(),
+cell_df <- as.data.frame(cells)
 
-    n_ASPC = sum(.data$ASPC, na.rm = TRUE),
-    n_ASPC_raw = sum(.data$ASPC_raw, na.rm = TRUE),
-    n_ASPC_not_callable = sum(.data$ASPC_not_callable, na.rm = TRUE),
-    n_ASPC_CEBPg_pos = sum(.data$ASPC_CEBPg_pos, na.rm = TRUE),
-    n_ASPC_CEBPg_neg = sum(.data$ASPC_CEBPg_neg, na.rm = TRUE),
+per_slide <- function(ids, f) {
+  do.call(rbind, lapply(ids, function(sid) {
+    d <- cell_df[cell_df$slide_id == sid, , drop = FALSE]
+    cbind(
+      data.frame(slide_id = sid, group = as.character(d$group[1]),
+                 stringsAsFactors = FALSE),
+      f(d)
+    )
+  }))
+}
 
-    n_EPI_CA = sum(.data$EPI_CA, na.rm = TRUE),
-    n_EPI_CA_raw = sum(.data$EPI_CA_raw, na.rm = TRUE),
-    n_EPI_CA_not_callable = sum(.data$EPI_CA_not_callable, na.rm = TRUE),
+ab_slide <- per_slide(tier2_ok, function(d) {
+  out <- data.frame(n_cells = nrow(d))
+  tum <- d$EPI_CA1 | d$EPI_CA2 | d$NE_CA
+  epi <- d$EPI_CA1 | d$EPI_CA2
+  for (p in POPS) out[[paste0("n_", p)]] <- sum(d[[p]], na.rm = TRUE)
+  out$n_Multi <- sum(d$multi_pop, na.rm = TRUE)
+  for (p in POPS) out[[paste0("frac_", p)]] <- mean(d[[p]], na.rm = TRUE)
+  out$frac_Multi <- mean(d$multi_pop, na.rm = TRUE)
+  for (s in STROMA_POPS) {
+    out[[paste0(s, "_per_1000_cells")]] <- 1000 * mean(d[[s]], na.rm = TRUE)
+    out[[paste0(s, "_per_epi_ca")]] <- sum(d[[s]], na.rm = TRUE) / max(sum(epi, na.rm = TRUE), 1)
+    out[[paste0(s, "_per_tumour")]] <- sum(d[[s]], na.rm = TRUE) / max(sum(tum, na.rm = TRUE), 1)
+  }
+  if (length(STROMA_POPS) == 2) {
+    s1 <- sum(d[[STROMA_POPS[1]]], na.rm = TRUE)
+    s2 <- sum(d[[STROMA_POPS[2]]], na.rm = TRUE)
+    out$split_share <- s1 / max(s1 + s2, 1)
+  }
+  out$EPI_CA1_frac_of_EPI_CA <- sum(d$EPI_CA1, na.rm = TRUE) / max(sum(epi, na.rm = TRUE), 1)
+  out
+}) |>
+  left_join(tile_area_mm2_by_slide, by = "slide_id")
 
-    n_NE_CA = sum(.data$NE_CA, na.rm = TRUE),
-    n_NE_CA_raw = sum(.data$NE_CA_raw, na.rm = TRUE),
-    n_NE_CA_not_callable = sum(.data$NE_CA_not_callable, na.rm = TRUE),
-
-    n_Multi = sum(.data$multi_pop, na.rm = TRUE),
-
-    frac_ASPC = mean(.data$ASPC, na.rm = TRUE),
-    frac_ASPC_raw = mean(.data$ASPC_raw, na.rm = TRUE),
-    frac_ASPC_not_callable = mean(.data$ASPC_not_callable, na.rm = TRUE),
-    frac_ASPC_CEBPg_pos = mean(.data$ASPC_CEBPg_pos, na.rm = TRUE),
-    frac_ASPC_CEBPg_neg = mean(.data$ASPC_CEBPg_neg, na.rm = TRUE),
-
-    frac_EPI_CA = mean(.data$EPI_CA, na.rm = TRUE),
-    frac_EPI_CA_raw = mean(.data$EPI_CA_raw, na.rm = TRUE),
-    frac_NE_CA = mean(.data$NE_CA, na.rm = TRUE),
-    frac_NE_CA_raw = mean(.data$NE_CA_raw, na.rm = TRUE),
-    frac_Multi = mean(.data$multi_pop, na.rm = TRUE),
-
-    aspc_per_1000_cells = 1000 * mean(.data$ASPC, na.rm = TRUE),
-    aspc_raw_per_1000_cells = 1000 * mean(.data$ASPC_raw, na.rm = TRUE),
-
-    aspc_per_epi_ca = sum(.data$ASPC, na.rm = TRUE) /
-      pmax(sum(.data$EPI_CA, na.rm = TRUE), 1),
-
-    aspc_per_tumour = sum(.data$ASPC, na.rm = TRUE) /
-      pmax(sum(.data$EPI_CA | .data$NE_CA, na.rm = TRUE), 1),
-
-    .groups = "drop"
-  ) |>
-  left_join(tile_area_mm2_by_slide, by = "slide_id") |>
-  mutate(
-    aspc_per_mm2 = n_ASPC / pmax(tissue_mm2, 1e-9),
-    aspc_raw_per_mm2 = n_ASPC_raw / pmax(tissue_mm2, 1e-9),
-    epi_ca_per_mm2 = n_EPI_CA / pmax(tissue_mm2, 1e-9),
-    ne_ca_per_mm2 = n_NE_CA / pmax(tissue_mm2, 1e-9)
-  )
+## Cell-bearing tile area, not a true tissue-mask area.
+for (p in POPS) {
+  ab_slide[[paste0(p, "_per_mm2")]] <-
+    ab_slide[[paste0("n_", p)]] / pmax(ab_slide$cellbearing_tile_mm2, 1e-9)
+}
 
 cat("\nAbundance by slide:\n")
-print(as.data.frame(ab_slide))
+print(ab_slide)
 
-write.csv(ab_slide, file.path(OUT, "aspc_abundance.csv"), row.names = FALSE)
+write.csv(ab_slide, file.path(OUT, paste0(PFX, "population_abundance.csv")), row.names = FALSE)
 
-ab_tests <- rbind(
-  cmp(ab_slide, "frac_ASPC", "ASPC fraction of all cells", "higher_in_NEPC"),
-  cmp(ab_slide, "aspc_per_1000_cells", "ASPC per 1000 cells", "higher_in_NEPC"),
-  cmp(ab_slide, "aspc_per_mm2", "ASPC per mm2 tissue", "higher_in_NEPC"),
-  cmp(ab_slide, "aspc_per_epi_ca", "ASPC per epithelial cancer cell", "higher_in_NEPC"),
-  cmp(ab_slide, "aspc_per_tumour", "ASPC per tumour cell", "higher_in_NEPC"),
-  cmp(ab_slide, "frac_ASPC_CEBPg_pos", "ASPC CEBPg+ fraction of all cells", "higher_in_NEPC"),
-  cmp(ab_slide, "frac_ASPC_CEBPg_neg", "ASPC CEBPg- fraction of all cells", "higher_in_NEPC"),
-  cmp(ab_slide, "frac_EPI_CA", "Epithelial cancer fraction", "lower_in_NEPC"),
-  cmp(ab_slide, "frac_NE_CA", "NE cancer fraction", "higher_in_NEPC")
-)
+ab_tests <- do.call(rbind, c(
+  lapply(POPS, function(p) rbind(
+    cmp(ab_slide, paste0("frac_", p), paste0(p, " fraction of all cells"), POP_DIRECTION[[p]]),
+    cmp(ab_slide, paste0(p, "_per_mm2"), paste0(p, " per mm2 cell-bearing tile area"), POP_DIRECTION[[p]])
+  )),
+  lapply(STROMA_POPS, function(s) rbind(
+    cmp(ab_slide, paste0(s, "_per_epi_ca"), paste0(s, " per epithelial cancer cell (EPI_CA1+EPI_CA2)"), "higher_in_NEPC"),
+    cmp(ab_slide, paste0(s, "_per_tumour"), paste0(s, " per tumour cell (EPI_CA1+EPI_CA2+NE_CA)"), "higher_in_NEPC")
+  )),
+  list(
+    if (length(STROMA_POPS) == 2)
+      cmp(ab_slide, "split_share", paste0(STROMA_POPS[1], " share of PDGFRA+ cells"), "higher_in_NEPC"),
+    cmp(ab_slide, "EPI_CA1_frac_of_EPI_CA", "EPI_CA1 share of AR+ panCK+ cells", "lower_in_NEPC")
+  )
+))
 
 ab_tests$p_adj <- signif(p.adjust(ab_tests$p, "BH"), 3)
 
 cat("\nAbundance: ADENO vs NEPC, slide-level\n")
 print(ab_tests, row.names = FALSE)
 
-write.csv(ab_tests, file.path(OUT, "aspc_abundance_tests.csv"), row.names = FALSE)
+write.csv(ab_tests, file.path(OUT, paste0(PFX, "population_abundance_tests.csv")), row.names = FALSE)
 
 ###############################################################################
-## 1B. BLANK FALSE-POSITIVE POPULATION CONTROLS -- AUDIT ONLY
+## 1B. BLANK FALSE-POSITIVE POPULATION CONTROLS
 ###############################################################################
 
-blank_slide <- cells |>
-  filter(slide_id %in% tier2_ok) |>
-  group_by(slide_id, group) |>
-  summarise(
-    n_cells = n(),
+blank_slide <- per_slide(tier2_ok, function(d) {
+  out <- data.frame(n_cells = nrow(d))
+  for (p in POPS) {
+    out[[paste0("n_", p)]] <- sum(d[[p]], na.rm = TRUE)
+    out[[paste0("n_", p, "_blank")]] <- sum(d[[paste0(p, "_blank")]], na.rm = TRUE)
+  }
+  for (p in POPS) {
+    out[[paste0("frac_", p)]] <- mean(d[[p]], na.rm = TRUE)
+    out[[paste0("frac_", p, "_blank")]] <- mean(d[[paste0(p, "_blank")]], na.rm = TRUE)
+  }
+  out
+})
 
-    n_ASPC = sum(.data$ASPC, na.rm = TRUE),
-    n_ASPC_raw = sum(.data$ASPC_raw, na.rm = TRUE),
-    n_ASPC_blank = sum(.data$ASPC_blank, na.rm = TRUE),
+cat("\nBlank false-positive controls by slide:\n")
+print(blank_slide)
 
-    n_EPI_CA = sum(.data$EPI_CA, na.rm = TRUE),
-    n_EPI_CA_blank = sum(.data$EPI_CA_blank, na.rm = TRUE),
+write.csv(blank_slide, file.path(OUT, paste0(PFX, "population_blank_false_positive_controls.csv")), row.names = FALSE)
 
-    n_NE_CA = sum(.data$NE_CA, na.rm = TRUE),
-    n_NE_CA_blank = sum(.data$NE_CA_blank, na.rm = TRUE),
+###############################################################################
+## 1C. BLANK-ADJUSTED MARKER ENRICHMENT
+###############################################################################
 
-    frac_ASPC = mean(.data$ASPC, na.rm = TRUE),
-    frac_ASPC_raw = mean(.data$ASPC_raw, na.rm = TRUE),
-    frac_ASPC_blank = mean(.data$ASPC_blank, na.rm = TRUE),
+enrich_slide <- blank_slide
+for (p in POPS) {
+  f  <- enrich_slide[[paste0("frac_", p)]]
+  fb <- enrich_slide[[paste0("frac_", p, "_blank")]]
+  enrich_slide[[paste0("frac_", p, "_net")]] <- pmax(f - fb, 0)
+  ## Undefined (NA) when the blank call count is zero, rather than f / 1e-9.
+  enrich_slide[[paste0(p, "_marker_to_blank")]] <- ifelse(fb > 0, f / fb, NA_real_)
+}
 
-    frac_EPI_CA = mean(.data$EPI_CA, na.rm = TRUE),
-    frac_EPI_CA_blank = mean(.data$EPI_CA_blank, na.rm = TRUE),
+cat("\nBlank-adjusted marker enrichment by slide:\n")
+print(enrich_slide)
 
-    frac_NE_CA = mean(.data$NE_CA, na.rm = TRUE),
-    frac_NE_CA_blank = mean(.data$NE_CA_blank, na.rm = TRUE),
+write.csv(enrich_slide, file.path(OUT, paste0(PFX, "population_blank_adjusted_enrichment.csv")), row.names = FALSE)
 
-    ASPC_enrichment_over_blank =
-      frac_ASPC / pmax(frac_ASPC_blank, 1e-9),
-    ASPC_raw_enrichment_over_blank =
-      frac_ASPC_raw / pmax(frac_ASPC_blank, 1e-9),
-    EPI_CA_enrichment_over_blank =
-      frac_EPI_CA / pmax(frac_EPI_CA_blank, 1e-9),
-    NE_CA_enrichment_over_blank =
-      frac_NE_CA / pmax(frac_NE_CA_blank, 1e-9),
+enrich_tests <- do.call(rbind, lapply(POPS, function(p) rbind(
+  cmp(enrich_slide, paste0("frac_", p, "_net"), paste0(p, " net fraction above blank"), POP_DIRECTION[[p]]),
+  cmp(enrich_slide, paste0(p, "_marker_to_blank"), paste0(p, " marker-to-blank ratio"), POP_DIRECTION[[p]])
+)))
 
-    .groups = "drop"
-  )
+enrich_tests$p_adj <- signif(p.adjust(enrich_tests$p, "BH"), 3)
 
-cat("\nBlank false-positive controls by slide; audit only, not used to suppress calls:\n")
-print(as.data.frame(blank_slide))
+cat("\nBlank-adjusted enrichment tests, slide-level:\n")
+print(enrich_tests, row.names = FALSE)
 
-write.csv(
-  blank_slide,
-  file.path(OUT, "aspc_blank_false_positive_controls_audit_only.csv"),
-  row.names = FALSE
-)
+write.csv(enrich_tests, file.path(OUT, paste0(PFX, "population_blank_adjusted_enrichment_tests.csv")), row.names = FALSE)
 
-aspc_enrich_slide <- blank_slide |>
+p1c <- enrich_slide |>
+  select(slide_id, group, ends_with("_marker_to_blank")) |>
+  pivot_longer(-c(slide_id, group), names_to = "metric", values_to = "value") |>
   mutate(
-    frac_ASPC_net = pmax(frac_ASPC - frac_ASPC_blank, 0),
-    frac_ASPC_raw_net = pmax(frac_ASPC_raw - frac_ASPC_blank, 0),
-    frac_EPI_CA_net = pmax(frac_EPI_CA - frac_EPI_CA_blank, 0),
-    frac_NE_CA_net = pmax(frac_NE_CA - frac_NE_CA_blank, 0),
+    metric = factor(sub("_marker_to_blank$", "", metric), levels = POPS),
+    group = factor(group, levels = GROUPS)
+  ) |>
+  ggplot(aes(group, value, colour = group)) +
+  geom_hline(yintercept = 1, linewidth = 0.3, linetype = 2) +
+  geom_boxplot(outlier.shape = NA, width = 0.55) +
+  geom_jitter(width = 0.12, size = 2.5) +
+  facet_wrap(~ metric, scales = "free_y", nrow = 1) +
+  labs(
+    title = "Marker-to-blank ratio per population",
+    subtitle = "fraction called with marker gates / fraction called with the same gates on blank channels; dashed = 1",
+    x = NULL,
+    y = "marker / blank"
+  ) +
+  theme_bw() +
+  theme(legend.position = "none")
 
-    ASPC_marker_to_blank = frac_ASPC / pmax(frac_ASPC_blank, 1e-9),
-    ASPC_raw_marker_to_blank = frac_ASPC_raw / pmax(frac_ASPC_blank, 1e-9),
-    EPI_CA_marker_to_blank = frac_EPI_CA / pmax(frac_EPI_CA_blank, 1e-9),
-    NE_CA_marker_to_blank = frac_NE_CA / pmax(frac_NE_CA_blank, 1e-9)
-  )
-
-cat("\nBlank-adjusted enrichment audit by slide:\n")
-print(as.data.frame(aspc_enrich_slide))
-
-write.csv(
-  aspc_enrich_slide,
-  file.path(OUT, "aspc_blank_adjusted_enrichment_audit_only.csv"),
-  row.names = FALSE
-)
-
-aspc_enrich_tests <- rbind(
-  cmp(aspc_enrich_slide, "frac_ASPC_net", "ASPC net fraction above blank", "higher_in_NEPC"),
-  cmp(aspc_enrich_slide, "ASPC_marker_to_blank", "ASPC marker-to-blank ratio", "higher_in_NEPC"),
-  cmp(aspc_enrich_slide, "frac_EPI_CA_net", "EPI_CA net fraction above blank", "lower_in_NEPC"),
-  cmp(aspc_enrich_slide, "EPI_CA_marker_to_blank", "EPI_CA marker-to-blank ratio", "lower_in_NEPC"),
-  cmp(aspc_enrich_slide, "frac_NE_CA_net", "NE_CA net fraction above blank", "higher_in_NEPC"),
-  cmp(aspc_enrich_slide, "NE_CA_marker_to_blank", "NE_CA marker-to-blank ratio", "higher_in_NEPC")
-)
-
-aspc_enrich_tests$p_adj <- signif(p.adjust(aspc_enrich_tests$p, "BH"), 3)
-
-cat("\nBlank-adjusted enrichment tests; audit only:\n")
-print(aspc_enrich_tests, row.names = FALSE)
-
-write.csv(
-  aspc_enrich_tests,
-  file.path(OUT, "aspc_blank_adjusted_enrichment_tests_audit_only.csv"),
-  row.names = FALSE
-)
+p1c <- p1c + BOX_THEME
+save_pdf(p1c, paste0(FPFX, "blank_adjusted_enrichment.pdf"), fig_w(length(POPS)), fig_h(1))
+keep_fig(p1c, fig_w(length(POPS)), fig_h(1))
 
 ###############################################################################
 ## 2. SPATIAL-BIN SPEARMAN RHO ANALYSIS
@@ -690,83 +650,60 @@ make_bin_counts_one_slide <- function(d, sid, bin_um = BIN_UM) {
 
   bin_px <- bin_um / PX_UM
 
-  d <- d |>
-    mutate(
-      x_bin = floor((x_px - min(x_px, na.rm = TRUE)) / bin_px),
-      y_bin = floor((y_px - min(y_px, na.rm = TRUE)) / bin_px),
-      STROMA_OTHER = pop == "Other"
-    )
+  d$x_bin <- floor((d$x_px - min(d$x_px, na.rm = TRUE)) / bin_px)
+  d$y_bin <- floor((d$y_px - min(d$y_px, na.rm = TRUE)) / bin_px)
 
-  d |>
-    group_by(slide_id, group, x_bin, y_bin) |>
-    summarise(
-      n_total = n(),
-      ASPC = sum(.data$ASPC, na.rm = TRUE),
-      ASPC_raw = sum(.data$ASPC_raw, na.rm = TRUE),
-      ASPC_not_callable = sum(.data$ASPC_not_callable, na.rm = TRUE),
-      ASPC_CEBPg_pos = sum(.data$ASPC_CEBPg_pos, na.rm = TRUE),
-      ASPC_CEBPg_neg = sum(.data$ASPC_CEBPg_neg, na.rm = TRUE),
-      EPI_CA = sum(.data$EPI_CA, na.rm = TRUE),
-      NE_CA = sum(.data$NE_CA, na.rm = TRUE),
-      Multi = sum(.data$multi_pop, na.rm = TRUE),
-      STROMA_OTHER = sum(.data$STROMA_OTHER, na.rm = TRUE),
-      .groups = "drop"
-    )
+  ## Operational stromal/other compartment: no population gate met.
+  ## This is not a dedicated fibroblast-marker-positive compartment.
+  d$STROMA_OTHER <- d$n_pop_flags == 0
+
+  key <- paste(d$x_bin, d$y_bin)
+  agg <- function(v) as.integer(tapply(v, key, sum, na.rm = TRUE))
+
+  out <- data.frame(
+    slide_id = sid,
+    group = as.character(d$group[1]),
+    x_bin = as.integer(tapply(d$x_bin, key, `[`, 1)),
+    y_bin = as.integer(tapply(d$y_bin, key, `[`, 1)),
+    n_total = as.integer(table(key)[sort(unique(key))]),
+    stringsAsFactors = FALSE
+  )
+  for (p in c(POPS, "STROMA_OTHER")) out[[p]] <- agg(d[[p]])
+  out$Multi <- agg(d$multi_pop)
+  out
 }
 
-spatial_bin_counts <- bind_rows(lapply(tier3_ok, function(sid) {
-  d <- cells |> filter(slide_id == sid)
-  make_bin_counts_one_slide(d, sid, bin_um = BIN_UM)
+spatial_bin_counts <- do.call(rbind, lapply(tier3_ok, function(sid) {
+  make_bin_counts_one_slide(cell_df[cell_df$slide_id == sid, , drop = FALSE], sid)
 }))
 
-spatial_rho <- NULL
-spatial_rho_tests <- NULL
+RHO_PAIRS <- rbind(
+  expand.grid(x = c(STROMA_POPS, "STROMA_OTHER"), y = TUMOUR_POPS,
+              stringsAsFactors = FALSE),
+  if (length(STROMA_POPS) == 2)
+    data.frame(x = STROMA_POPS[1], y = STROMA_POPS[2], stringsAsFactors = FALSE)
+)
+RHO_PAIRS$label <- paste(RHO_PAIRS$x, "vs", RHO_PAIRS$y)
 
-if (!nrow(spatial_bin_counts)) {
+if (is.null(spatial_bin_counts) || !nrow(spatial_bin_counts)) {
   warning("No spatial bins available for rho analysis.", call. = FALSE)
+  spatial_rho <- NULL
+  spatial_rho_tests <- NULL
+
 } else {
-  write.csv(
-    spatial_bin_counts,
-    file.path(OUT, "spatial_bin_counts.csv"),
-    row.names = FALSE
-  )
+  write.csv(spatial_bin_counts, file.path(OUT, paste0(PFX, "spatial_bin_counts.csv")), row.names = FALSE)
 
   rho_one_pair <- function(b, xcol, ycol, pair_label) {
     x <- b[[xcol]]
     y <- b[[ycol]]
+
     ok <- is.finite(x) & is.finite(y)
 
     n_bins <- sum(ok)
     x_total <- sum(x[ok], na.rm = TRUE)
     y_total <- sum(y[ok], na.rm = TRUE)
 
-    if (
-      n_bins < MIN_BINS_FOR_RHO ||
-      x_total < MIN_TOTAL_CELLS_FOR_RHO ||
-      y_total < MIN_TOTAL_CELLS_FOR_RHO ||
-      length(unique(x[ok])) < 2 ||
-      length(unique(y[ok])) < 2
-    ) {
-      return(data.frame(
-        slide_id = unique(b$slide_id)[1],
-        group = unique(b$group)[1],
-        bin_um = BIN_UM,
-        pair = pair_label,
-        x_population = xcol,
-        y_population = ycol,
-        n_bins = n_bins,
-        x_total = x_total,
-        y_total = y_total,
-        rho = NA_real_,
-        p = NA_real_,
-        skipped = TRUE,
-        row.names = NULL
-      ))
-    }
-
-    ct <- suppressWarnings(stats::cor.test(x[ok], y[ok], method = "spearman", exact = FALSE))
-
-    data.frame(
+    res <- data.frame(
       slide_id = unique(b$slide_id)[1],
       group = unique(b$group)[1],
       bin_um = BIN_UM,
@@ -776,92 +713,124 @@ if (!nrow(spatial_bin_counts)) {
       n_bins = n_bins,
       x_total = x_total,
       y_total = y_total,
-      rho = round(unname(ct$estimate), 3),
-      p = signif(ct$p.value, 3),
-      skipped = FALSE,
+      rho = NA_real_,
+      p = NA_real_,
+      skipped = TRUE,
       row.names = NULL
     )
+
+    if (
+      n_bins < MIN_BINS_FOR_RHO ||
+      x_total < MIN_TOTAL_CELLS_FOR_RHO ||
+      y_total < MIN_TOTAL_CELLS_FOR_RHO ||
+      length(unique(x[ok])) < 2 ||
+      length(unique(y[ok])) < 2
+    ) {
+      return(res)
+    }
+
+    ct <- suppressWarnings(
+      cor.test(x[ok], y[ok], method = "spearman", exact = FALSE)
+    )
+
+    res$rho <- round(unname(ct$estimate), 3)
+    res$p <- signif(ct$p.value, 3)
+    res$skipped <- FALSE
+    res
   }
 
-  spatial_rho <- bind_rows(lapply(split(spatial_bin_counts, spatial_bin_counts$slide_id), function(b) {
-    bind_rows(
-      rho_one_pair(b, "ASPC", "EPI_CA", "ASPC vs EPI_CA"),
-      rho_one_pair(b, "ASPC", "NE_CA", "ASPC vs NE_CA"),
-      rho_one_pair(b, "ASPC", "Multi", "ASPC vs Multi"),
-      rho_one_pair(b, "STROMA_OTHER", "EPI_CA", "STROMA_OTHER vs EPI_CA"),
-      rho_one_pair(b, "STROMA_OTHER", "NE_CA", "STROMA_OTHER vs NE_CA")
-    )
-  }))
+  spatial_rho <- do.call(rbind, lapply(
+    split(spatial_bin_counts, spatial_bin_counts$slide_id),
+    function(b) do.call(rbind, lapply(seq_len(nrow(RHO_PAIRS)), function(i)
+      rho_one_pair(b, RHO_PAIRS$x[i], RHO_PAIRS$y[i], RHO_PAIRS$label[i])))
+  ))
 
   spatial_rho$group <- factor(spatial_rho$group, levels = GROUPS)
 
   cat("\nSpatial-bin Spearman rho by slide:\n")
   print(spatial_rho, row.names = FALSE)
 
-  write.csv(
-    spatial_rho,
-    file.path(OUT, "spatial_bin_correlations.csv"),
-    row.names = FALSE
-  )
+  write.csv(spatial_rho, file.path(OUT, paste0(PFX, "spatial_bin_correlations.csv")), row.names = FALSE)
 
-  spatial_rho_tests <- bind_rows(lapply(unique(spatial_rho$pair), function(pp) {
-    d <- spatial_rho |> filter(pair == pp, !skipped)
+  spatial_rho_tests <- do.call(rbind, lapply(RHO_PAIRS$label, function(pp) {
+    d <- spatial_rho |>
+      filter(pair == pp, !skipped)
+
     if (!nrow(d)) return(NULL)
 
-    expected <- if (pp %in% c("ASPC vs EPI_CA", "ASPC vs NE_CA", "ASPC vs Multi")) {
-      "higher_in_NEPC"
-    } else {
-      "lower_in_NEPC"
-    }
+    expected <- if (startsWith(pp, "STROMA_OTHER")) "lower_in_NEPC" else "higher_in_NEPC"
 
     cmp(d, "rho", paste0("spatial rho: ", pp), expected)
   }))
 
-  if (nrow(spatial_rho_tests)) {
+  if (!is.null(spatial_rho_tests)) {
     spatial_rho_tests$p_adj <- signif(p.adjust(spatial_rho_tests$p, "BH"), 3)
 
     cat("\nSpatial-bin rho tests, slide-level:\n")
     print(spatial_rho_tests, row.names = FALSE)
 
-    write.csv(
-      spatial_rho_tests,
-      file.path(OUT, "spatial_bin_correlation_tests.csv"),
-      row.names = FALSE
-    )
+    write.csv(spatial_rho_tests, file.path(OUT, paste0(PFX, "spatial_bin_correlation_tests.csv")), row.names = FALSE)
   }
+
+  p_rho <- spatial_rho |>
+    filter(!skipped) |>
+    mutate(pair = factor(pair, levels = RHO_PAIRS$label)) |>
+    ggplot(aes(group, rho, colour = group)) +
+    geom_hline(yintercept = 0, linewidth = 0.3, linetype = 2) +
+    geom_boxplot(outlier.shape = NA, width = 0.55) +
+    geom_jitter(width = 0.12, size = 2.5) +
+    facet_wrap(~ pair, ncol = 3) +
+    labs(
+      title = paste0("Spatial-bin Spearman correlation, ", BIN_UM, " µm bins"),
+      subtitle = "rho across occupied bins within each slide; pairs with <20 cells of either population skipped",
+      x = NULL,
+      y = "Spearman rho"
+    ) +
+    theme_bw() +
+    theme(legend.position = "none")
+
+  p_rho <- p_rho + BOX_THEME
+  n_rho <- length(unique(spatial_rho$pair[!spatial_rho$skipped]))
+  save_pdf(p_rho, paste0(FPFX, "spatial_bin_rho.pdf"), fig_w(3), fig_h(ceiling(n_rho / 3)))
+  keep_fig(p_rho, fig_w(3), fig_h(ceiling(n_rho / 3)))
 }
 
 ###############################################################################
 ## 3. SPATIAL PROXIMITY
 ###############################################################################
 
+nn_med <- function(A, B) {
+  if (!nrow(A) || !nrow(B)) return(NA_real_)
+  median(RANN::nn2(B, A, k = 1)$nn.dists[, 1]) * PX_UM
+}
+
 prox_one <- function(d, from_lgl, to_lgl, from_lab, to_lab, sid, grp) {
   xy <- as.matrix(d[, c("x_px", "y_px")])
 
-  from_lgl <- .bool(from_lgl)
-  to_lgl <- .bool(to_lgl)
+  from_lgl[is.na(from_lgl)] <- FALSE
+  to_lgl[is.na(to_lgl)] <- FALSE
 
   nf <- sum(from_lgl)
   nt <- sum(to_lgl)
 
-  if (nf < MIN_N || nt < MIN_N) {
-    return(data.frame(
-      slide_id = sid,
-      group = grp,
-      from = from_lab,
-      to = to_lab,
-      n_from = nf,
-      n_to = nt,
-      obs_um = NA_real_,
-      null_um = NA_real_,
-      z = NA_real_,
-      frac_within_50um = NA_real_,
-      frac_within_100um = NA_real_,
-      p_perm = NA_real_,
-      skipped = TRUE,
-      row.names = NULL
-    ))
-  }
+  res <- data.frame(
+    slide_id = sid,
+    group = grp,
+    from = from_lab,
+    to = to_lab,
+    n_from = nf,
+    n_to = nt,
+    obs_um = NA_real_,
+    null_um = NA_real_,
+    z = NA_real_,
+    frac_within_50um = NA_real_,
+    frac_within_100um = NA_real_,
+    p_perm = NA_real_,
+    skipped = TRUE,
+    row.names = NULL
+  )
+
+  if (nf < MIN_N || nt < MIN_N) return(res)
 
   dd <- RANN::nn2(
     xy[to_lgl, , drop = FALSE],
@@ -882,281 +851,157 @@ prox_one <- function(d, from_lgl, to_lgl, from_lab, to_lab, sid, grp) {
   mu  <- mean(nullv, na.rm = TRUE)
   sdv <- sd(nullv, na.rm = TRUE)
 
-  data.frame(
-    slide_id = sid,
-    group = grp,
-    from = from_lab,
-    to = to_lab,
-    n_from = nf,
-    n_to = nt,
-    obs_um = round(obs, 1),
-    null_um = round(mu, 1),
-    z = round((obs - mu) / max(sdv, 1e-9), 2),
-    frac_within_50um = round(mean(dd <= 50), 3),
-    frac_within_100um = round(mean(dd <= 100), 3),
-    p_perm = signif((1 + sum(nullv <= obs, na.rm = TRUE)) / (N_PERM + 1), 3),
-    skipped = FALSE,
-    row.names = NULL
-  )
+  res$obs_um <- round(obs, 1)
+  res$null_um <- round(mu, 1)
+  res$z <- round((obs - mu) / max(sdv, 1e-9), 2)
+  res$frac_within_50um <- round(mean(dd <= 50), 3)
+  res$frac_within_100um <- round(mean(dd <= 100), 3)
+  res$p_perm <- signif((1 + sum(nullv <= obs, na.rm = TRUE)) / (N_PERM + 1), 3)
+  res$skipped <- FALSE
+  res
 }
 
-prox <- bind_rows(lapply(tier3_ok, function(sid) {
-  d <- cells |> filter(slide_id == sid)
-  if (!nrow(d)) return(NULL)
+prox <- do.call(rbind, lapply(tier3_ok, function(sid) {
+  d <- cell_df[cell_df$slide_id == sid, , drop = FALSE]
+  grp <- as.character(d$group[1])
 
-  grp <- as.character(unique(d$group))[1]
-
-  bind_rows(
-    prox_one(d, d$ASPC, d$EPI_CA, "ASPC", "EPI_CA", sid, grp),
-    prox_one(d, d$ASPC, d$NE_CA, "ASPC", "NE_CA", sid, grp)
-  )
+  do.call(rbind, lapply(STROMA_POPS, function(s)
+    do.call(rbind, lapply(TUMOUR_POPS, function(t)
+      prox_one(d, d[[s]], d[[t]], s, t, sid, grp)))))
 }))
 
-prox_tests <- NULL
+prox$group <- factor(prox$group, levels = GROUPS)
 
-if (!nrow(prox)) {
-  warning("No proximity results generated.", call. = FALSE)
-} else {
-  prox$group <- factor(prox$group, levels = GROUPS)
+cat("\nProximity by slide:\n")
+print(prox, row.names = FALSE)
 
-  cat("\nProximity by slide:\n")
-  print(prox, row.names = FALSE)
+write.csv(prox, file.path(OUT, paste0(PFX, "stroma_proximity_perslide.csv")), row.names = FALSE)
 
-  write.csv(
-    prox,
-    file.path(OUT, "aspc_proximity_perslide.csv"),
-    row.names = FALSE
+skip <- prox |>
+  filter(skipped)
+
+if (nrow(skip)) {
+  warning(
+    "Proximity skipped (<", MIN_N, " cells) for ",
+    nrow(skip),
+    " slide-pair combinations -- see skipped column.",
+    call. = FALSE
   )
+}
 
-  skip <- prox |> filter(skipped)
-  if (nrow(skip)) {
-    warning(
-      "Proximity skipped (<", MIN_N, " cells) for ", nrow(skip),
-      " slide-pair combinations -- see skipped column.",
-      call. = FALSE
-    )
-  }
+prox_tests <- do.call(rbind, lapply(STROMA_POPS, function(s)
+  do.call(rbind, lapply(TUMOUR_POPS, function(tgt) {
+    d <- prox |>
+      filter(from == s, to == tgt, !skipped)
 
-  prox_tests <- bind_rows(lapply(c("EPI_CA", "NE_CA"), function(tgt) {
-    d <- prox |> filter(to == tgt, !skipped)
     if (!nrow(d)) return(NULL)
 
-    bind_rows(
-      cmp(d, "obs_um", paste0("ASPC->", tgt, ": median NN dist (um)"), "lower_in_NEPC"),
-      cmp(d, "z", paste0("ASPC->", tgt, ": proximity z"), "lower_in_NEPC"),
-      cmp(d, "frac_within_50um", paste0("ASPC->", tgt, ": frac within 50um"), "higher_in_NEPC"),
-      cmp(d, "frac_within_100um", paste0("ASPC->", tgt, ": frac within 100um"), "higher_in_NEPC")
+    lab <- paste0(s, "->", tgt)
+    rbind(
+      cmp(d, "obs_um", paste0(lab, ": median NN dist (um)"), "lower_in_NEPC"),
+      cmp(d, "z", paste0(lab, ": proximity z"), "lower_in_NEPC"),
+      cmp(d, "frac_within_50um", paste0(lab, ": frac within 50um"), "higher_in_NEPC"),
+      cmp(d, "frac_within_100um", paste0(lab, ": frac within 100um"), "higher_in_NEPC")
     )
-  }))
+  }))))
 
-  if (nrow(prox_tests)) {
-    prox_tests$p_adj <- signif(p.adjust(prox_tests$p, "BH"), 3)
+if (!is.null(prox_tests)) {
+  prox_tests$p_adj <- signif(p.adjust(prox_tests$p, "BH"), 3)
 
-    cat("\nProximity: ADENO vs NEPC, slide-level\n")
-    print(prox_tests, row.names = FALSE)
+  cat("\nProximity: ADENO vs NEPC, slide-level\n")
+  print(prox_tests, row.names = FALSE)
 
-    write.csv(
-      prox_tests,
-      file.path(OUT, "aspc_proximity_group_tests.csv"),
-      row.names = FALSE
-    )
-  }
+  write.csv(prox_tests, file.path(OUT, paste0(PFX, "stroma_proximity_group_tests.csv")), row.names = FALSE)
 }
 
 ###############################################################################
-## 4. NEIGHBOURHOOD COMPOSITION AROUND ASPC
+## 4. NEIGHBOURHOOD COMPOSITION AROUND STROMAL CELLS
 ###############################################################################
 
-## v11.7 capped the search at the 100 nearest cells (which truncates the
-## 50 um disc in dense tumour) and looped over populations in R. Now: an exact
-## radius search per slide, which also yields per-cell neighbourhood flags
-## used by 05_visualize.R:
-##   in_ASPC_nbhd        cell lies within RADIUS_UM of at least one ASPC
-##                       (ASPC themselves included)
-##   n_ASPC_within_r     number of ASPC (other than itself) within RADIUS_UM
-## Composition is reported two ways:
-##   pooled_pairs: all (ASPC, neighbour) pairs within the radius, as before;
-##   unique_cells: distinct cells inside the union of ASPC discs, compared with
-##                 whole-slide composition (the "ASPC neighbourhood" itself).
-
 rad_px <- RADIUS_UM / PX_UM
-if (!exists("NBR_K")) NBR_K <- 400L
+NBR_POPS <- c(POPS, "Multi", "Other")
 
-NBR_POPS <- c("ASPC", "EPI_CA", "NE_CA", "Multi", "Other")
-
-cells$in_ASPC_nbhd <- FALSE
-cells$n_ASPC_within_r <- 0L
-
-nbr_list <- list()
-nbr_comp_list <- list()
-
-for (sid in tier3_ok) {
-  ii <- which(cells$slide_id == sid)
-  d <- cells[ii, c("x_px", "y_px", "pop", "ASPC", "group")]
-  ia <- which(d$ASPC)
-
-  if (!length(ia)) next
-
+nbr <- do.call(rbind, lapply(tier3_ok, function(sid) {
+  d <- cell_df[cell_df$slide_id == sid, , drop = FALSE]
   xy <- as.matrix(d[, c("x_px", "y_px")])
-  k <- min(NBR_K, nrow(d))
+  k <- min(100L, nrow(d))
 
-  nn <- RANN::nn2(xy, xy[ia, , drop = FALSE], k = k,
-                  searchtype = "radius", radius = rad_px)
-  idx <- nn$nn.idx
-  idx[idx == 0L | nn$nn.dists > rad_px] <- NA_integer_
-  sat <- mean(!is.na(idx[, k]))
-  if (sat > 0.01) {
-    warning(sid, ": ", round(100 * sat, 1), "% of ASPC discs hit NBR_K = ", k,
-            " neighbours; raise NBR_K.", call. = FALSE)
-  }
+  do.call(rbind, lapply(STROMA_POPS, function(s) {
+    idx <- which(d[[s]] %in% TRUE)
+    if (length(idx) < MIN_N) return(NULL)
 
-  ## drop self
-  idx[idx == matrix(ia, nrow(idx), ncol(idx))] <- NA_integer_
+    nn <- RANN::nn2(xy, xy[idx, , drop = FALSE], k = k)
 
-  nb <- as.vector(idx)
-  nb <- nb[!is.na(nb)]
+    ## Neighbours within radius, excluding the centre cell itself (distance 0).
+    within <- nn$nn.dists <= rad_px & nn$nn.dists > 0
+    nb_pop <- d[[LABCOL]][nn$nn.idx[within]]
+    cnt <- as.numeric(table(factor(nb_pop, levels = NBR_POPS)))
 
-  hits <- tabulate(nb, nbins = nrow(d))
-  in_nb <- hits > 0L
-  in_nb[ia] <- TRUE
+    obs <- cnt / max(sum(cnt), 1)
+    exp <- as.numeric(table(factor(d[[LABCOL]], levels = NBR_POPS))) / nrow(d)
 
-  cells$in_ASPC_nbhd[ii] <- in_nb
-  cells$n_ASPC_within_r[ii] <- hits
-
-  grp <- as.character(d$group[1])
-  pop_f <- function(v) factor(v, levels = NBR_POPS)
-
-  pair_cnt <- as.numeric(table(pop_f(d$pop[nb])))
-  obs <- pair_cnt / max(sum(pair_cnt), 1)
-  exp <- as.numeric(table(pop_f(d$pop))) / nrow(d)
-
-  if (length(ia) >= MIN_N) {
-    nbr_list[[sid]] <- data.frame(
+    data.frame(
       slide_id = sid,
-      group = grp,
-      n_ASPC = length(ia),
+      group = as.character(d$group[1]),
+      centre = s,
+      n_centre = length(idx),
       neighbour = NBR_POPS,
-      n_pairs = pair_cnt,
       obs_frac = round(obs, 4),
       exp_frac = round(exp, 4),
       log2_enrich = round(log2((obs + 1e-4) / (exp + 1e-4)), 2),
       row.names = NULL
     )
-  }
+  }))
+}))
 
-  ## Cells within RADIUS_UM of at least one OTHER ASPC (other ASPC count, so
-  ## ASPC-ASPC clustering is visible; a lone ASPC is not its own neighbour).
-  uniq <- as.numeric(table(pop_f(d$pop[hits > 0L])))
-  nbr_comp_list[[sid]] <- data.frame(
-    slide_id = sid,
-    group = grp,
-    radius_um = RADIUS_UM,
-    n_ASPC = length(ia),
-    n_cells_slide = nrow(d),
-    n_cells_in_nbhd = sum(in_nb),
-    frac_slide_cells_in_nbhd = round(mean(in_nb), 4),
-    population = NBR_POPS,
-    n_in_nbhd = uniq,
-    frac_in_nbhd = round(uniq / max(sum(uniq), 1), 4),
-    frac_whole_slide = round(exp, 4),
-    log2_enrich_vs_slide = round(log2((uniq / max(sum(uniq), 1) + 1e-4) / (exp + 1e-4)), 2),
-    row.names = NULL
-  )
-}
-
-nbr <- bind_rows(nbr_list)
-nbr_comp <- bind_rows(nbr_comp_list)
-
-if (nrow(nbr_comp)) {
-  write.csv(nbr_comp, file.path(OUT, "aspc_neighbourhood_composition.csv"), row.names = FALSE)
-  cat("\nASPC neighbourhood (union of ", RADIUS_UM, " um discs) vs whole slide:\n", sep = "")
-  print(nbr_comp, row.names = FALSE)
-}
-
-## Slim per-cell table for visualisation / export.
-cells_spatial <- cells[, intersect(c(
-  "cell_id", "slide_id", "group", "x_px", "y_px", "area_um2", "pop",
-  "ASPC", "ASPC_CEBPg_pos", "ASPC_CEBPg_neg", "EPI_CA", "NE_CA", "multi_pop",
-  "in_ASPC_nbhd", "n_ASPC_within_r", "tile_x", "tile_y"
-), names(cells))]
-cells_spatial$px_um <- PX_UM
-saveRDS(cells_spatial, file.path(OUT, "cells_spatial.rds"))
-
-if (nrow(nbr)) {
+if (!is.null(nbr) && nrow(nbr)) {
   nbr$group <- factor(nbr$group, levels = GROUPS)
 
-  cat("\nNeighbourhood within ", RADIUS_UM, " um of ASPC:\n", sep = "")
+  cat("\nNeighbourhood within ", RADIUS_UM, " um of ", paste(STROMA_POPS, collapse = " / "), " cells:\n", sep = "")
   print(nbr, row.names = FALSE)
 
-  write.csv(
-    nbr,
-    file.path(OUT, "aspc_neighbourhood.csv"),
-    row.names = FALSE
-  )
-} else {
-  warning("No ASPC neighbourhood summaries generated; too few ASPC cells.", call. = FALSE)
+  write.csv(nbr, file.path(OUT, paste0(PFX, "stroma_neighbourhood.csv")), row.names = FALSE)
 }
 
 ###############################################################################
 ## 5. HYPOTHESIS SUMMARY
 ###############################################################################
 
-hyp_parts <- list(
-  ab_tests |>
-    filter(metric == "ASPC per mm2 tissue") |>
-    mutate(prediction = "(i) ASPC more abundant in NEPC"),
-
-  aspc_enrich_tests |>
-    filter(metric == "ASPC net fraction above blank") |>
-    mutate(prediction = "(i-b, audit) ASPC above blank")
-)
-
-if (!is.null(prox_tests) && nrow(prox_tests)) {
-  hyp_parts <- c(hyp_parts, list(
-    prox_tests |>
-      filter(metric == "ASPC->EPI_CA: proximity z") |>
-      mutate(prediction = "(ii) ASPC closer to epithelial cancer in NEPC"),
-
-    prox_tests |>
-      filter(metric == "ASPC->NE_CA: proximity z") |>
-      mutate(prediction = "(iii) ASPC closer to NE cancer in NEPC")
-  ))
+pick <- function(tab, metric_name, prediction) {
+  if (is.null(tab)) return(NULL)
+  r <- tab[tab$metric == metric_name, , drop = FALSE]
+  if (!nrow(r)) return(NULL)
+  r$prediction <- prediction
+  r
 }
 
-if (!is.null(spatial_rho_tests) && nrow(spatial_rho_tests)) {
-  hyp_parts <- c(hyp_parts, list(
-    spatial_rho_tests |>
-      filter(metric == "spatial rho: ASPC vs EPI_CA") |>
-      mutate(prediction = "(iv) ASPC spatial rho with epithelial cancer"),
-
-    spatial_rho_tests |>
-      filter(metric == "spatial rho: ASPC vs NE_CA") |>
-      mutate(prediction = "(v) ASPC spatial rho with NE cancer"),
-
-    spatial_rho_tests |>
-      filter(metric == "spatial rho: STROMA_OTHER vs EPI_CA") |>
-      mutate(prediction = "(vi) non-ASPC stromal spatial rho with epithelial cancer")
-  ))
-}
-
-hyp <- bind_rows(hyp_parts) |>
-  select(
-    prediction, metric,
-    n_ADENO, n_NEPC,
-    med_ADENO, med_NEPC,
-    hodges_lehmann, p, supports
-  )
+hyp <- do.call(rbind, c(
+  lapply(STROMA_POPS, function(s) rbind(
+    pick(ab_tests, paste0(s, " per mm2 cell-bearing tile area"),
+         paste0(s, " more abundant in NEPC")),
+    pick(enrich_tests, paste0(s, " net fraction above blank"),
+         paste0(s, " enriched above blank in NEPC"))
+  )),
+  lapply(TUMOUR_POPS, function(t) pick(ab_tests, paste0(t, " fraction of all cells"),
+                                       paste0(t, " abundance, expected ", POP_DIRECTION[[t]]))),
+  unlist(lapply(STROMA_POPS, function(s) lapply(TUMOUR_POPS, function(t) rbind(
+    pick(prox_tests, paste0(s, "->", t, ": proximity z"),
+         paste0(s, " closer to ", t, " in NEPC")),
+    if (exists("spatial_rho_tests")) pick(spatial_rho_tests, paste0("spatial rho: ", s, " vs ", t),
+         paste0(s, " co-localises with ", t, " more in NEPC"))
+  ))), recursive = FALSE)
+)) |>
+  select(prediction, metric, n_ADENO, n_NEPC, med_ADENO, med_NEPC,
+         hodges_lehmann, p, supports)
 
 cat("\n================ HYPOTHESIS SUMMARY ================\n")
 print(as.data.frame(hyp), row.names = FALSE)
-cat("`supports` = direction of effect only. With n<=3 per arm, treat every row as descriptive.\n")
-cat("Blank-derived metrics are audit/QC context only and do not suppress ASPC calls.\n")
-
-write.csv(
-  hyp,
-  file.path(OUT, "hypothesis_summary.csv"),
-  row.names = FALSE
+cat(
+  "`supports` = direction of effect only. With n<=3 per arm, p cannot\n",
+  "reach 0.05; treat every row as descriptive.\n"
 )
+
+write.csv(hyp, file.path(OUT, paste0(PFX, "hypothesis_summary.csv")), row.names = FALSE)
 
 ###############################################################################
 ## 6. FIGURES
@@ -1165,49 +1010,58 @@ write.csv(
 message("\nWriting figures (PDF):")
 
 p1 <- ab_slide |>
-  select(
-    slide_id, group,
-    frac_ASPC, frac_ASPC_raw, frac_ASPC_not_callable,
-    frac_ASPC_CEBPg_pos, frac_ASPC_CEBPg_neg,
-    aspc_per_1000_cells, aspc_per_mm2,
-    aspc_per_epi_ca, aspc_per_tumour
-  ) |>
-  tidyr::pivot_longer(
-    -c(slide_id, group),
-    names_to = "metric",
-    values_to = "value"
+  select(slide_id, group, all_of(paste0(POPS, "_per_mm2"))) |>
+  pivot_longer(-c(slide_id, group), names_to = "metric", values_to = "value") |>
+  mutate(
+    metric = factor(sub("_per_mm2$", "", metric), levels = POPS),
+    group = factor(group, levels = GROUPS)
   ) |>
   ggplot(aes(group, value, colour = group)) +
   geom_boxplot(outlier.shape = NA, width = 0.55) +
   geom_jitter(width = 0.12, size = 2.6) +
-  facet_wrap(~ metric, scales = "free_y") +
+  facet_wrap(~ metric, scales = "free_y", nrow = 1) +
   labs(
-    title = "Prediction (i): ASPC abundance",
-    subtitle = "ASPC uses pixel-level corrected PDGF-positive cell calls; blank metrics are audit only",
+    title = "Population abundance (cells per mm2 cell-bearing tile area)",
+    subtitle = paste(
+      paste(DEF_TEXT, "EPI_CA1 = AR+ FOLH1+ panCK+;"),
+      "EPI_CA2 = AR+ FOLH1- panCK+; NE_CA = DLL3+"
+    ),
     x = NULL,
-    y = NULL
+    y = "cells / mm2"
   ) +
   theme_bw() +
   theme(legend.position = "none")
 
-save_pdf(p1, "04_aspc_abundance.pdf", 12, 6)
-keep_fig(p1, 12, 6)
+p1 <- p1 + BOX_THEME
+save_pdf(p1, paste0(FPFX, "population_abundance.pdf"), max(fig_w(length(POPS)), 11), fig_h(1))
+keep_fig(p1, max(fig_w(length(POPS)), 11), fig_h(1))
+
+p1s <- ab_slide |>
+  select(slide_id, group, ends_with("_per_tumour"), ends_with("_per_epi_ca"),
+         any_of("split_share"), EPI_CA1_frac_of_EPI_CA) |>
+  pivot_longer(-c(slide_id, group), names_to = "metric", values_to = "value") |>
+  mutate(group = factor(group, levels = GROUPS)) |>
+  ggplot(aes(group, value, colour = group)) +
+  geom_boxplot(outlier.shape = NA, width = 0.55) +
+  geom_jitter(width = 0.12, size = 2.6) +
+  facet_wrap(~ metric, scales = "free_y", nrow = 2) +
+  labs(title = "Stromal ratios", subtitle = "each point = one slide",
+       x = NULL, y = NULL) +
+  theme_bw() +
+  theme(legend.position = "none")
+
+p1s <- p1s + BOX_THEME
+n_p1s <- length(unique(p1s$data$metric))
+save_pdf(p1s, paste0(FPFX, "stromal_ratios.pdf"), fig_w(ceiling(n_p1s / 2)), fig_h(2))
+keep_fig(p1s, fig_w(ceiling(n_p1s / 2)), fig_h(2))
 
 p1b <- blank_slide |>
-  select(
-    slide_id, group,
-    frac_ASPC, frac_ASPC_raw, frac_ASPC_blank,
-    frac_EPI_CA, frac_EPI_CA_blank,
-    frac_NE_CA, frac_NE_CA_blank
-  ) |>
-  tidyr::pivot_longer(
-    -c(slide_id, group),
-    names_to = "metric",
-    values_to = "value"
-  ) |>
+  select(slide_id, group, starts_with("frac_")) |>
+  pivot_longer(-c(slide_id, group), names_to = "metric", values_to = "value") |>
   mutate(
-    control = ifelse(grepl("_blank$", metric), "blank_as_marker", "marker"),
-    population = gsub("^frac_|_blank$", "", metric)
+    control = ifelse(grepl("_blank$", metric), "blank", "marker"),
+    population = factor(gsub("^frac_|_blank$", "", metric), levels = POPS),
+    group = factor(group, levels = GROUPS)
   ) |>
   ggplot(aes(control, value, colour = group)) +
   geom_boxplot(outlier.shape = NA, width = 0.55) +
@@ -1215,110 +1069,44 @@ p1b <- blank_slide |>
   facet_grid(population ~ group, scales = "free_y") +
   labs(
     title = "Blank false-positive controls",
-    subtitle = "negative-control channels processed as pseudo-markers; audit only, not a hard exclusion gate",
+    subtitle = "same population gates applied to the secondary-only channels",
     x = NULL,
     y = "fraction of cells"
   ) +
   theme_bw()
 
-save_pdf(p1b, "04_blank_false_positive_controls_audit_only.pdf", 10, 7)
-keep_fig(p1b, 10, 7)
+## Many rows: flatter panels so the page stays readable.
+p1b <- p1b + theme(aspect.ratio = 0.6)
+save_pdf(p1b, paste0(FPFX, "blank_false_positive_controls.pdf"), fig_w(2) + 1, fig_h(length(POPS), 0.6))
+keep_fig(p1b, fig_w(2) + 1, fig_h(length(POPS), 0.6))
 
-p1c <- aspc_enrich_slide |>
-  select(
-    slide_id, group,
-    frac_ASPC_net, ASPC_marker_to_blank,
-    frac_EPI_CA_net, EPI_CA_marker_to_blank,
-    frac_NE_CA_net, NE_CA_marker_to_blank
-  ) |>
-  tidyr::pivot_longer(
-    -c(slide_id, group),
-    names_to = "metric",
-    values_to = "value"
-  ) |>
-  ggplot(aes(group, value, colour = group)) +
-  geom_boxplot(outlier.shape = NA, width = 0.55) +
-  geom_jitter(width = 0.12, size = 2.5) +
-  facet_wrap(~ metric, scales = "free_y") +
-  labs(
-    title = "Blank-adjusted marker enrichment audit",
-    subtitle = "audit context only; final cell detection is pixel-level corrected",
-    x = NULL,
-    y = NULL
-  ) +
-  theme_bw() +
-  theme(legend.position = "none")
-
-save_pdf(p1c, "04_aspc_blank_adjusted_enrichment_audit_only.pdf", 12, 6)
-keep_fig(p1c, 12, 6)
-
-if (!is.null(spatial_rho) && nrow(spatial_rho) && any(!spatial_rho$skipped)) {
-  p_rho <- spatial_rho |>
+if (any(!prox$skipped)) {
+  pd <- prox |>
     filter(!skipped) |>
-    ggplot(aes(group, rho, colour = group)) +
-    geom_hline(yintercept = 0, linewidth = 0.3, linetype = 2) +
-    geom_boxplot(outlier.shape = NA, width = 0.55) +
-    geom_jitter(width = 0.12, size = 2.5) +
-    facet_wrap(~ pair, scales = "free_y") +
-    labs(
-      title = paste0("Spatial-bin Spearman correlation, ", BIN_UM, " um bins"),
-      subtitle = "ASPC uses pixel-level corrected calls",
-      x = NULL,
-      y = "Spearman rho"
-    ) +
-    theme_bw() +
-    theme(legend.position = "none")
-
-  save_pdf(p_rho, "04_spatial_bin_rho.pdf", 12, 6)
-  keep_fig(p_rho, 12, 6)
-
-  scatter_dat <- bind_rows(
-    spatial_bin_counts |> transmute(slide_id, group, pair = "ASPC vs EPI_CA", x = EPI_CA, y = ASPC),
-    spatial_bin_counts |> transmute(slide_id, group, pair = "ASPC vs NE_CA", x = NE_CA, y = ASPC),
-    spatial_bin_counts |> transmute(slide_id, group, pair = "STROMA_OTHER vs EPI_CA", x = EPI_CA, y = STROMA_OTHER),
-    spatial_bin_counts |> transmute(slide_id, group, pair = "STROMA_OTHER vs NE_CA", x = NE_CA, y = STROMA_OTHER)
-  )
-
-  p_rho_scatter <- ggplot(scatter_dat, aes(log1p(x), log1p(y), colour = group)) +
-    geom_point(alpha = 0.45, size = 0.8) +
-    geom_smooth(method = "lm", se = FALSE, linewidth = 0.5) +
-    facet_grid(pair ~ slide_id, scales = "free") +
-    labs(
-      title = paste0("Spatial-bin population co-occurrence, ", BIN_UM, " um bins"),
-      subtitle = "each point = one occupied spatial bin; axes are log1p cell counts",
-      x = "log1p target population count per bin",
-      y = "log1p ASPC or STROMA_OTHER count per bin"
-    ) +
-    theme_bw()
-
-  save_pdf(p_rho_scatter, "04_spatial_bin_scatter.pdf", 14, 9)
-  keep_fig(p_rho_scatter, 14, 9)
-}
-
-if (!is.null(prox) && nrow(prox) && any(!prox$skipped)) {
-  pd <- prox |> filter(!skipped)
+    mutate(to = factor(to, levels = TUMOUR_POPS), from = factor(from, levels = STROMA_POPS))
 
   p2 <- ggplot(pd, aes(group, obs_um, colour = group)) +
     geom_boxplot(outlier.shape = NA, width = 0.55) +
     geom_jitter(width = 0.12, size = 2.6) +
-    facet_wrap(~ to, scales = "free_y") +
+    facet_grid(from ~ to, scales = "free_y") +
     labs(
-      title = "ASPC -> target: median nearest-neighbour distance",
-      subtitle = "ASPC uses pixel-level corrected PDGF-positive calls",
+      title = "Stromal -> tumour: median nearest-neighbour distance",
+      subtitle = "slides with <20 cells of either population omitted",
       x = NULL,
-      y = "median NN distance (um)"
+      y = "median NN distance (µm)"
     ) +
     theme_bw() +
     theme(legend.position = "none")
 
-  save_pdf(p2, "04_proximity_distance.pdf", 9, 4.5)
-  keep_fig(p2, 9, 4.5)
+  p2 <- p2 + BOX_THEME
+  save_pdf(p2, paste0(FPFX, "proximity_distance.pdf"), fig_w(length(TUMOUR_POPS)), fig_h(length(STROMA_POPS)))
+  keep_fig(p2, fig_w(length(TUMOUR_POPS)), fig_h(length(STROMA_POPS)))
 
   p3 <- ggplot(pd, aes(group, z, colour = group)) +
     geom_hline(yintercept = 0, linewidth = 0.3, linetype = 2) +
     geom_boxplot(outlier.shape = NA, width = 0.55) +
     geom_jitter(width = 0.12, size = 2.6) +
-    facet_wrap(~ to) +
+    facet_grid(from ~ to) +
     labs(
       title = "Proximity z vs label-permuted null",
       subtitle = "negative = closer than chance; density-corrected within slide",
@@ -1328,57 +1116,70 @@ if (!is.null(prox) && nrow(prox) && any(!prox$skipped)) {
     theme_bw() +
     theme(legend.position = "none")
 
-  save_pdf(p3, "04_proximity_z.pdf", 9, 4.5)
-  keep_fig(p3, 9, 4.5)
+  p3 <- p3 + BOX_THEME
+  save_pdf(p3, paste0(FPFX, "proximity_z.pdf"), fig_w(length(TUMOUR_POPS)), fig_h(length(STROMA_POPS)))
+  keep_fig(p3, fig_w(length(TUMOUR_POPS)), fig_h(length(STROMA_POPS)))
 
   p4 <- pd |>
-    select(slide_id, group, to, frac_within_50um, frac_within_100um) |>
-    tidyr::pivot_longer(
-      starts_with("frac_"),
-      names_to = "radius",
-      values_to = "frac"
-    ) |>
+    select(slide_id, group, from, to, frac_within_50um, frac_within_100um) |>
+    pivot_longer(starts_with("frac_"), names_to = "radius", values_to = "frac") |>
     mutate(radius = sub("frac_within_", "", radius)) |>
-    ggplot(aes(group, frac, colour = group)) +
-    geom_boxplot(outlier.shape = NA, width = 0.55) +
-    geom_jitter(width = 0.12, size = 2.4) +
-    facet_grid(radius ~ to) +
+    ggplot(aes(group, frac, colour = group, shape = radius)) +
+    geom_point(position = position_dodge(width = 0.5), size = 2.4) +
+    facet_grid(from ~ to) +
     labs(
-      title = "Fraction of ASPC with a target cell within radius",
+      title = "Fraction of stromal cells with a tumour cell within radius",
       x = NULL,
       y = "fraction"
     ) +
     theme_bw() +
-    theme(legend.position = "none")
+    guides(colour = "none")
 
-  save_pdf(p4, "04_proximity_within_radius.pdf", 9, 6)
-  keep_fig(p4, 9, 6)
+  p4 <- p4 + BOX_THEME
+  save_pdf(p4, paste0(FPFX, "proximity_within_radius.pdf"), fig_w(length(TUMOUR_POPS)) + 0.8, fig_h(length(STROMA_POPS)))
+  keep_fig(p4, fig_w(length(TUMOUR_POPS)) + 0.8, fig_h(length(STROMA_POPS)))
 }
 
-if (nrow(nbr)) {
-  p5 <- ggplot(nbr, aes(neighbour, slide_id, fill = log2_enrich)) +
+if (!is.null(nbr) && nrow(nbr)) {
+  p5 <- nbr |>
+    mutate(neighbour = factor(neighbour, levels = NBR_POPS),
+           centre = factor(centre, levels = STROMA_POPS)) |>
+    ggplot(aes(neighbour, slide_id, fill = log2_enrich)) +
     geom_tile() +
-    facet_grid(group ~ ., scales = "free_y", space = "free_y") +
+    geom_text(aes(label = log2_enrich), size = 2.6) +
+    facet_grid(group ~ centre, scales = "free_y", space = "free_y") +
     scale_fill_gradient2(low = "blue", mid = "white", high = "red") +
     labs(
-      title = paste0("Neighbourhood enrichment within ", RADIUS_UM, " um of ASPC"),
+      title = paste0("Neighbourhood enrichment within ", RADIUS_UM, " µm of ", paste(STROMA_POPS, collapse = " / "), " cells"),
+      subtitle = "log2(observed / slide-wide expected); centres with <20 cells omitted",
       x = NULL,
       y = NULL
     ) +
-    theme_bw()
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
-  save_pdf(p5, "04_neighbourhood.pdf", 9, 5)
-  keep_fig(p5, 9, 5)
+  save_pdf(p5, paste0(FPFX, "neighbourhood.pdf"), 11, 5)
+  keep_fig(p5, 11, 5)
 }
 
-###############################################################################
+
+invisible(NULL)
+}
+
+run_set("PDGFRA", "pop", "", "04_", "PDGFRA = PDGFRA+;")
+run_set(SPLIT_POPS, "pop_split", "exploratory_", "04x_exploratory_",
+        "PDGFRA_CEBPDpos = PDGFRA+ CEBPD+; PDGFRA_CEBPDneg = PDGFRA+ CEBPD-;",
+        CAPTION = "Exploratory: PDGFRA+ cells split by CEBPD")
+
 ## 7. SPATIAL MAPS
 ###############################################################################
 
-map_dat <- cells |> filter(slide_id %in% tier3_ok)
+map_dat <- cells |>
+  filter(slide_id %in% tier3_ok)
 
 if (!MAP_INCLUDE_OTHER) {
-  map_dat <- map_dat |> filter(pop != "Other")
+  map_dat <- map_dat |>
+    filter(pop != "Other")
 }
 
 map_dat <- map_dat |>
@@ -1390,25 +1191,16 @@ map_dat <- map_dat |>
   ungroup() |>
   mutate(
     panel = paste0(group, " | ", slide_id),
-    pop = factor(
-      pop,
-      levels = c(
-        "ASPC", "EPI_CA", "NE_CA", "Multi",
-        "ASPC_not_callable", "EPI_CA_not_callable", "NE_CA_not_callable",
-        "Other"
-      )
-    )
+    pop = factor(pop, levels = c(POPS, "Multi", "Other"))
   )
 
 pop_cols <- c(
-  ASPC = "#F8766D",
-  EPI_CA = "#7CAE00",
-  NE_CA = "#00BFC4",
+  PDGFRA = "#FF7F00",
+  EPI_CA1 = "#4DAF4A",
+  EPI_CA2 = "#A6D854",
+  NE_CA = "#377EB8",
   Multi = "#C77CFF",
-  ASPC_not_callable = "grey35",
-  EPI_CA_not_callable = "grey55",
-  NE_CA_not_callable = "grey70",
-  Other = "grey88"
+  Other = "grey85"
 )
 
 if (nrow(map_dat)) {
@@ -1419,14 +1211,7 @@ if (nrow(map_dat)) {
       alpha = 0.18
     ) +
     geom_point(
-      data = dplyr::filter(map_dat, grepl("_not_callable$", as.character(pop))),
-      size = 0.10,
-      alpha = 0.22
-    ) +
-    geom_point(
-      data = dplyr::filter(map_dat, !pop %in% c(
-        "Other", "ASPC_not_callable", "EPI_CA_not_callable", "NE_CA_not_callable"
-      )),
+      data = dplyr::filter(map_dat, pop != "Other"),
       size = 0.25,
       alpha = 0.65
     ) +
@@ -1435,40 +1220,37 @@ if (nrow(map_dat)) {
     scale_y_reverse() +
     scale_colour_manual(values = pop_cols, drop = FALSE) +
     labs(
-      title = "Spatial distribution of ASPC and tumour populations",
-      subtitle = "ASPC/EPI_CA/NE_CA use pixel-level corrected calls; blank controls are audit only",
+      title = "Spatial distribution of PDGFRA+ stromal and tumour populations",
+      subtitle = "all available slides; each panel translated to its own origin; shared mm scale",
       x = "mm",
       y = "mm"
     ) +
     theme_bw() +
     guides(colour = guide_legend(override.aes = list(size = 3)))
 
-  ## Millions of points: write raster PNGs, not vector PDFs.
-  ggplot2::ggsave(file.path(PLOTDIR, "04_spatial_maps.png"), pmap,
-                  width = 12, height = 8, dpi = 200)
-  message("  wrote 04_spatial_maps.png")
+  save_pdf(pmap, "04_spatial_maps.pdf", 12, 8)
+  keep_fig(pmap, 12, 8)
+
+  PDF_DEV(
+    file.path(PLOTDIR, "04_spatial_maps_perslide.pdf"),
+    width = 8,
+    height = 8,
+    onefile = TRUE
+  )
 
   for (sid in unique(map_dat$slide_id)) {
-    d <- map_dat |> filter(slide_id == sid)
+    d <- map_dat |>
+      filter(slide_id == sid)
 
-    ggplot2::ggsave(
-      file.path(PLOTDIR, paste0("04_spatial_map_", sid, ".png")),
-      width = 9, height = 9, dpi = 200,
-      plot = ggplot(mapping = aes(x_mm, y_mm, colour = pop)) +
+    print(
+      ggplot(mapping = aes(x_mm, y_mm, colour = pop)) +
         geom_point(
           data = dplyr::filter(d, pop == "Other"),
           size = 0.08,
           alpha = 0.18
         ) +
         geom_point(
-          data = dplyr::filter(d, grepl("_not_callable$", as.character(pop))),
-          size = 0.10,
-          alpha = 0.22
-        ) +
-        geom_point(
-          data = dplyr::filter(d, !pop %in% c(
-            "Other", "ASPC_not_callable", "EPI_CA_not_callable", "NE_CA_not_callable"
-          )),
+          data = dplyr::filter(d, pop != "Other"),
           size = 0.25,
           alpha = 0.65
         ) +
@@ -1477,13 +1259,10 @@ if (nrow(map_dat)) {
         scale_colour_manual(values = pop_cols, drop = FALSE) +
         labs(
           title = paste0(sid, "  [", unique(d$group), "]"),
-          subtitle = paste0(
-            "ASPC ", sum(d$pop == "ASPC", na.rm = TRUE),
-            " | EPI_CA ", sum(d$pop == "EPI_CA", na.rm = TRUE),
-            " | NE_CA ", sum(d$pop == "NE_CA", na.rm = TRUE),
-            " | Multi ", sum(d$pop == "Multi", na.rm = TRUE),
-            " | ASPC_not_callable ", sum(d$pop == "ASPC_not_callable", na.rm = TRUE),
-            " | Other ", sum(d$pop == "Other", na.rm = TRUE)
+          subtitle = paste(
+            vapply(c(POPS, "Multi", "Other"), function(p)
+              paste(p, sum(d$pop == p, na.rm = TRUE)), character(1)),
+            collapse = " | "
           ),
           x = "mm",
           y = "mm"
@@ -1493,9 +1272,14 @@ if (nrow(map_dat)) {
     )
   }
 
-  message("  wrote 04_spatial_map_<slide>.png")
+  invisible(dev.off())
+  message("  wrote 04_spatial_maps_perslide.pdf")
+
 } else {
-  warning("No cells available for spatial maps after slide filtering.", call. = FALSE)
+  warning(
+    "No cells available for spatial maps after slide filtering.",
+    call. = FALSE
+  )
 }
 
 ###############################################################################
@@ -1510,9 +1294,20 @@ if (length(.figs)) {
     onefile = TRUE
   )
 
-  for (f in .figs) print(f$plot)
+  ## Draw each figure at its own size, top-centred, instead of stretching it
+  ## to the page.
+  for (f in .figs) {
+    grid::grid.newpage()
+    grid::pushViewport(grid::viewport(
+      x = 0.5, y = 1, just = c("centre", "top"),
+      width = grid::unit(f$w, "in"), height = grid::unit(f$h, "in")
+    ))
+    print(f$plot, newpage = FALSE)
+    grid::popViewport()
+  }
 
   invisible(dev.off())
+
   message("  wrote 04_figures.pdf (", length(.figs), " pages)")
 }
 

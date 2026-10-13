@@ -1,38 +1,38 @@
 ###############################################################################
-# 03_classify.R  v11.5
+# 03_classify.R  v11.2
 #
-# v11.5 CHANGE
-#   - Restores the full classifier. v11.4.2 (commit 7808e70) kept only the
-#     usability-audit / radius / population-call blocks, so `cells`,
-#     `qc_gates`, `gate_marker_one_slide` etc. were undefined and the script
-#     could not run. This version = v11.4.1 input/QC/gating + outputs, with the
-#     v11.4.2 population rules (no slide-level usability suppression):
-#       ASPC   = PDGFa+            (CEBPg splits ASPC into CEBPg+ / CEBPg-)
-#       EPI_CA = panCK+ & (FOLH1+ | AR+)
-#       NE_CA  = DLL3+
-#       Multi  = more than one of the above
-#   - Slide list and pixel size come from slides_final.rds / channels.rds and
-#     the per-cell area_um2 written by 02, not hardcoded values.
-#   - Per-tile blank-fit constants are read from tile_qc_all.csv (02 v11.5
-#     stores them per tile rather than per cell).
+# Classification using corrected features from 02_segment_measure.R v11.2.
 #
-# Classification using corrected features from 02_segment_measure.R v11.3+.
+# NOTE ON PMOT32 (v11.2):
+#   This script reads cells_raw.rds and never touches the TIFFs directly, so
+#   the PMOT32 re-acquisition (20260826, 8-cycle protocol with secondary-only
+#   negative controls, AR/DLL3 = Cycle 6) requires no path changes here.
+#   PMOT32 now carries the same blank-subtracted feature set as every other
+#   slide, so the blank false-positive control below is defined for all six
+#   slides and no slide-specific handling is needed.
+#   Ensure 01_channels.R and 02_segment_measure.R have been re-run against the
+#   new acquisition before running this script -- see the freshness guard below.
 #
-# v11.4.1 CHANGE
-#   Fixes output-summary failure by explicitly creating ASPC_not_callable and
-#   using robust per-slide summary helpers.
+# Uses:
+#   - local perinuclear ring features
+#   - pixel-level blank subtraction
+#   - AF puncta exclusion
+#   - radius sensitivity, 4 / 6 / 8 µm
+#   - blank false-positive control
 #
-# v11.4 CHANGE
-#   Population calls are marker-usability gated:
-#     - Raw marker calls (*_pos) are retained for audit.
-#     - QC-gated marker calls (*_pos_qc) require marker_usable == TRUE.
-#     - Final ASPC, EPI_CA, and NE_CA use only QC-gated marker evidence.
-#     - Non-callable raw population calls are retained separately as
-#       ASPC_not_callable, EPI_CA_not_callable, and NE_CA_not_callable.
-#     - ASPC CEBPg subgrouping is marked unknown when CEBPg is not callable.
+# Primary classification radius:
+#   RING_UM_PRIMARY = 6
+#
+# Population logic (2026-10-13, PDGFRA run):
+#   PDGFRA  = PDGFRA_pos                       (main stromal population)
+#   PDGFRA_CEBPDpos = PDGFRA_pos & CEBPD_pos   (exploratory split)
+#   PDGFRA_CEBPDneg = PDGFRA_pos & !CEBPD_pos  (exploratory split)
+#   EPI_CA1 = AR_pos & FOLH1_pos & panCK_pos
+#   EPI_CA2 = AR_pos & !FOLH1_pos & panCK_pos
+#   NE_CA   = DLL3_pos
 ###############################################################################
 
-if (!exists("OUT")) OUT <- "/Volumes/T9/results_ASPC_NEPC"
+if (!exists("OUT")) OUT <- "/Volumes/T9/Case Studies/multiplex_analysis_20261013_PDGFRA_v2"
 
 suppressPackageStartupMessages({
   library(dplyr)
@@ -45,70 +45,55 @@ suppressPackageStartupMessages({
 infile <- file.path(OUT, "cells_raw.rds")
 
 if (!file.exists(infile)) {
-  stop(
-    "Missing cells_raw.rds. Re-run revised 02_segment_measure.R first.",
-    call. = FALSE
-  )
+  stop("Missing cells_raw.rds. Re-run revised 02_segment_measure.R first.",
+       call. = FALSE)
 }
 
 cells <- readRDS(infile)
 
-if (!is.data.frame(cells) || !nrow(cells)) {
-  stop("cells_raw.rds has zero rows or is not a data.frame.", call. = FALSE)
+if (!nrow(cells)) {
+  stop("cells_raw.rds has zero rows.", call. = FALSE)
 }
 
-EXPECTED_SLIDES <- readRDS(file.path(OUT, "slides_final.rds"))$slide_id
+## Expected slide set. All six now share the 8-cycle protocol with NC cycles.
+EXPECTED_SLIDES <- c("PM0T32", "PM677_A8", "PM12_B3",
+                     "PM1024_B", "PM423", "PM159T5")
 
 .present <- unique(cells$slide_id)
 .absent  <- setdiff(EXPECTED_SLIDES, .present)
 .extra   <- setdiff(.present, EXPECTED_SLIDES)
 
 if (length(.absent)) {
-  warning(
-    "cells_raw.rds is missing expected slide(s): ",
-    paste(.absent, collapse = ", "),
-    " -- was 02_segment_measure.R run on the full set?",
-    call. = FALSE
-  )
+  warning("cells_raw.rds is missing expected slide(s): ",
+          paste(.absent, collapse = ", "),
+          " -- was 02_segment_measure.R run on the full set?",
+          call. = FALSE)
 }
 
 if (length(.extra)) {
-  warning(
-    "cells_raw.rds contains unexpected slide(s): ",
-    paste(.extra, collapse = ", "),
-    call. = FALSE
-  )
+  warning("cells_raw.rds contains unexpected slide(s): ",
+          paste(.extra, collapse = ", "),
+          call. = FALSE)
 }
 
+## Freshness guard: PMOT32 must come from the 20260826 re-acquisition, which
+## carries negative controls. A stale row from the old 6-cycle run would have
+## has_negctrl = FALSE and must not be classified with blank subtraction.
 if ("has_negctrl" %in% names(cells)) {
-  .no_nc <- unique(cells$slide_id[!(cells$has_negctrl %in% TRUE)])
-  .no_nc <- .no_nc[!is.na(.no_nc)]
-
+  .no_nc <- unique(cells$slide_id[!cells$has_negctrl])
   if (length(.no_nc)) {
-    stop(
-      "Slide(s) without negative controls in cells_raw.rds: ",
-      paste(.no_nc, collapse = ", "),
-      "\nThis indicates a stale segmentation. Re-run 01_channels.R and ",
-      "02_segment_measure.R against the current acquisitions.",
-      call. = FALSE
-    )
+    stop("Slide(s) without negative controls in cells_raw.rds: ",
+         paste(.no_nc, collapse = ", "),
+         "\nThis indicates a stale segmentation. Re-run 01_channels.R and ",
+         "02_segment_measure.R against the current acquisitions.",
+         call. = FALSE)
   }
-} else {
-  stop(
-    "cells_raw.rds is missing has_negctrl. Re-run revised 02_segment_measure.R first.",
-    call. = FALSE
-  )
 }
 
-PX_UM <- readRDS(file.path(OUT, "channels.rds"))$px_um
-if (is.null(PX_UM) || !is.finite(PX_UM)) PX_UM <- 12500 / 44643
+PX_UM <- 12500 / 44643
 if ("area_um2" %in% names(cells)) {
   PX_UM <- sqrt(median(cells$area_um2 / cells$area, na.rm = TRUE))
 }
-
-## Per-tile correction constants from 02 (blank slope / r2 etc.).
-tile_qc_file <- file.path(OUT, "tile_qc_all.csv")
-tile_qc <- if (file.exists(tile_qc_file)) read.csv(tile_qc_file, stringsAsFactors = FALSE) else NULL
 
 ###############################################################################
 ## QC FILTER
@@ -120,18 +105,10 @@ MIN_REG_COR  <- 0.85
 
 cells$area_um2 <- cells$area * PX_UM^2
 
-if (!"reg_qc_informative" %in% names(cells)) {
-  cells$reg_qc_informative <- is.finite(cells$reg_cor)
-}
-
 keep <- is.finite(cells$area_um2) &
         cells$area_um2 >= MIN_AREA_UM2 &
         cells$area_um2 <= MAX_AREA_UM2 &
-        (
-          !(cells$reg_qc_informative %in% TRUE) |
-            is.na(cells$reg_cor) |
-            cells$reg_cor >= MIN_REG_COR
-        )
+        (is.na(cells$reg_cor) | cells$reg_cor >= MIN_REG_COR)
 
 cat("QC keep:", sum(keep), "/", nrow(cells), "cells\n")
 
@@ -149,45 +126,45 @@ RING_UM_PRIMARY <- 6
 RING_UM_SET <- c(4, 6, 8)
 
 MARKER_COMPARTMENT <- c(
-  CEBPg = "nuc",
+  CEBPD = "nuc",
   AR    = "nuc",
-  PDGF  = "ring",
+  PDGFRA  = "ring",
   panCK = "ring",
   FOLH1 = "ring",
   DLL3  = "ring"
 )
 
+## Minimum fraction of the relevant compartment that must be positive.
+## These protect against one bright residual AF dot calling a cell positive.
 MIN_FRAC <- c(
-  CEBPg = 0.08,
+  CEBPD = 0.08,
   AR    = 0.08,
-  PDGF  = 0.06,
+  PDGFRA  = 0.06,
   panCK = 0.06,
   FOLH1 = 0.06,
   DLL3  = 0.05
 )
 
+## Strong morphology override:
+## If enough compartment pixels are positive, allow low mean residual signal.
 HIGH_FRAC <- c(
-  CEBPg = NA_real_,
-  AR    = NA_real_,
-  PDGF  = NA_real_,
-  panCK = NA_real_,
-  FOLH1 = NA_real_,
-  DLL3  = NA_real_
+  CEBPD = 0.20,
+  AR    = 0.20,
+  PDGFRA  = 0.15,
+  panCK = 0.15,
+  FOLH1 = 0.15,
+  DLL3  = 0.12
 )
 
+## Reject cells where too much of the relevant compartment was AF-masked.
 MAX_AF_FRAC <- c(
-  CEBPg = 0.05,
+  CEBPD = 0.05,
   AR    = 0.05,
-  PDGF  = 0.10,
+  PDGFRA  = 0.10,
   panCK = 0.10,
   FOLH1 = 0.10,
   DLL3  = 0.10
 )
-
-MIN_MARKER_TO_BLANK_ENRICHMENT <- 2.0
-MAX_BLANK_FRAC_POS <- 0.10
-MAX_GAIN_R2_FOR_WEAK_ENRICHMENT <- 0.90
-GAIN_SLOPE_TOL <- 0.05
 
 .ring_tag <- function(r_um) {
   paste0("r", gsub("\\.", "p", as.character(r_um)), "um")
@@ -246,7 +223,7 @@ if (length(missing)) {
   stop(
     "Missing v11 corrected feature columns from 02:\n  ",
     paste(missing, collapse = "\n  "),
-    "\nRe-run 02_segment_measure.R v11.3+ before 03.",
+    "\nRe-run 02_segment_measure.R v11.2 before 03.",
     call. = FALSE
   )
 }
@@ -259,18 +236,6 @@ if (length(missing)) {
   x <- x[is.finite(x)]
   if (!length(x)) return(default)
   as.numeric(quantile(x, p, na.rm = TRUE, names = FALSE))
-}
-
-.median_col <- function(d, col, default = NA_real_) {
-  ## Tile-level constants live in tile_qc, not on cells.
-  if (!col %in% names(d) && !is.null(tile_qc) && col %in% names(tile_qc)) {
-    d <- tile_qc[tile_qc$slide_id %in% unique(d$slide_id), , drop = FALSE]
-  }
-  if (!col %in% names(d)) return(default)
-  x <- d[[col]]
-  x <- x[is.finite(x)]
-  if (!length(x)) return(default)
-  median(x, na.rm = TRUE)
 }
 
 .robust_thr <- function(x) {
@@ -309,12 +274,6 @@ if (length(missing)) {
       af    = paste0(pre, "_af_frac")
     )
   }
-}
-
-.bool <- function(x) {
-  y <- x %in% TRUE
-  y[is.na(y)] <- FALSE
-  y
 }
 
 gate_marker_one_slide <- function(d, marker, r_um = RING_UM_PRIMARY, blank = FALSE) {
@@ -356,8 +315,10 @@ gate_marker_one_slide <- function(d, marker, r_um = RING_UM_PRIMARY, blank = FAL
   }
 
   pos <- eligible &
-         score > thr &
-         frac >= MIN_FRAC[[marker]]
+         (
+           (score > thr & frac >= MIN_FRAC[[marker]]) |
+           (score > 0   & frac >= HIGH_FRAC[[marker]])
+         )
 
   pos[is.na(pos)] <- FALSE
 
@@ -379,7 +340,7 @@ gate_marker_one_slide <- function(d, marker, r_um = RING_UM_PRIMARY, blank = FAL
 }
 
 ###############################################################################
-## PRIMARY MARKER GATES, 6 um
+## PRIMARY CLASSIFICATION, 6 µm
 ###############################################################################
 
 for (m in names(MARKER_COMPARTMENT)) {
@@ -478,82 +439,14 @@ write.csv(
   row.names = FALSE
 )
 
-cat("\n=== Primary marker gates, 6 um:\n")
+cat("\n=== Primary marker gates, 6 µm:\n")
 print(qc_gates)
 
-cat("\n=== Blank false-positive control, 6 um:\n")
+cat("\n=== Blank false-positive control, 6 µm:\n")
 print(qc_blank_false_positive)
 
 ###############################################################################
-## MARKER USABILITY QC, 6 um -- AUDIT ONLY, NOT USED FOR CELL CALLING
-###############################################################################
-
-marker_usability <- do.call(rbind, lapply(unique(cells$slide_id), function(sid) {
-  d <- cells[cells$slide_id == sid, , drop = FALSE]
-
-  do.call(rbind, lapply(names(MARKER_COMPARTMENT), function(m) {
-    cp <- MARKER_COMPARTMENT[[m]]
-    pre <- .feature_prefix(m, cp, RING_UM_PRIMARY)
-
-    marker_row <- qc_gates[
-      qc_gates$slide_id == sid &
-        qc_gates$marker == m &
-        qc_gates$control_type == "marker",
-      , drop = FALSE
-    ]
-
-    blank_row <- qc_blank_false_positive[
-      qc_blank_false_positive$slide_id == sid &
-        qc_blank_false_positive$marker == m &
-        qc_blank_false_positive$control_type == "blank_as_marker",
-      , drop = FALSE
-    ]
-
-    marker_frac <- if (nrow(marker_row)) marker_row$frac_pos[1] else NA_real_
-    blank_frac  <- if (nrow(blank_row))  blank_row$frac_pos[1]  else NA_real_
-
-    enrichment <- marker_frac / pmax(blank_frac, 1e-9)
-
-    slope <- .median_col(d, paste0(pre, "_blank_slope"))
-    r2    <- .median_col(d, paste0(pre, "_blank_r2"))
-
-    data.frame(
-      slide_id = sid,
-      marker = m,
-      marker_frac_pos = marker_frac,
-      blank_frac_pos = blank_frac,
-      enrichment_over_blank = enrichment,
-      median_blank_slope = slope,
-      median_blank_r2 = r2,
-
-      ## Important:
-      ## marker_usable is retained only for QC reporting.
-      ## It is NOT used to suppress cell calls.
-      marker_usable = TRUE,
-      fail_reason = "audit_only_not_used_for_calling",
-
-      stringsAsFactors = FALSE
-    )
-  }))
-}))
-
-cat("\n=== Marker usability audit, primary 6 um; NOT used for cell calling:\n")
-print(marker_usability, row.names = FALSE)
-
-write.csv(
-  marker_usability,
-  file.path(OUT, "qc_marker_usability_primary_6um.csv"),
-  row.names = FALSE
-)
-
-## Add usability columns for compatibility, but keep all markers callable.
-for (m in names(MARKER_COMPARTMENT)) {
-  usable_col <- paste0(m, "_usable")
-  cells[[usable_col]] <- TRUE
-}
-
-###############################################################################
-## RADIUS SENSITIVITY, 4 / 6 / 8 um
+## RADIUS SENSITIVITY, 4 / 6 / 8 µm
 ###############################################################################
 
 sens <- list()
@@ -613,140 +506,42 @@ cat("\n=== Radius sensitivity, ring markers:\n")
 print(qc_radius_sensitivity)
 
 ###############################################################################
-## POPULATION CALLS -- PIXEL-CORRECTED CELL CALLS, NO SLIDE-LEVEL BLANK QC GATE
+## POPULATION CALLS
 ###############################################################################
 
-## Raw marker calls are already based on:
-##   - pixel-level matched-blank subtraction from 02
-##   - AF puncta masking from 02
-##   - corrected per-cell sub and frac_pos gates in 03
-##
-## Therefore do not suppress cells based on slide-level mean blank positivity.
+cells$CEBPD_neg <- !cells$CEBPD_pos
 
-for (m in names(MARKER_COMPARTMENT)) {
-  pos_col <- paste0(m, "_pos")
-  qc_col <- paste0(m, "_pos_qc")
+## Population definitions (2026-10-13).
+cells$PDGFRA          <- cells$PDGFRA_pos
+cells$PDGFRA_CEBPDpos <- cells$PDGFRA_pos & cells$CEBPD_pos
+cells$PDGFRA_CEBPDneg <- cells$PDGFRA_pos & !cells$CEBPD_pos
+cells$EPI_CA1 <- cells$AR_pos & cells$FOLH1_pos & cells$panCK_pos
+cells$EPI_CA2 <- cells$AR_pos & !cells$FOLH1_pos & cells$panCK_pos
+cells$NE_CA   <- cells$DLL3_pos
 
-  ## Compatibility column.
-  ## Since slide-level marker usability QC is audit-only now,
-  ## the QC-gated call is identical to the corrected marker call.
-  cells[[qc_col]] <- cells[[pos_col]] %in% TRUE
-}
+## Blank-derived false-positive population controls, same gates on blank channels.
+cells$PDGFRA_blank          <- cells$PDGFRA_blank_pos
+cells$PDGFRA_CEBPDpos_blank <- cells$PDGFRA_blank_pos & cells$CEBPD_blank_pos
+cells$PDGFRA_CEBPDneg_blank <- cells$PDGFRA_blank_pos & !cells$CEBPD_blank_pos
+cells$EPI_CA1_blank <- cells$AR_blank_pos & cells$FOLH1_blank_pos & cells$panCK_blank_pos
+cells$EPI_CA2_blank <- cells$AR_blank_pos & !cells$FOLH1_blank_pos & cells$panCK_blank_pos
+cells$NE_CA_blank   <- cells$DLL3_blank_pos
 
-cells$CEBPg_neg <- !(cells$CEBPg_pos %in% TRUE)
-cells$CEBPg_neg_qc <- !(cells$CEBPg_pos_qc %in% TRUE)
-
-## ASPC:
-## Requested definition simplifies to PDGF_pos.
-## Final ASPC now uses corrected PDGF cell calls directly.
-cells$ASPC_raw <- cells$PDGF_pos %in% TRUE
-cells$ASPC_callable <- TRUE
-cells$ASPC_not_callable <- FALSE
-cells$ASPC <- cells$ASPC_raw
-
-cells$ASPC_CEBPg_pos <- cells$ASPC & (cells$CEBPg_pos %in% TRUE)
-cells$ASPC_CEBPg_neg <- cells$ASPC & !(cells$CEBPg_pos %in% TRUE)
-
-cells$ASPC_raw_CEBPg_pos <- cells$ASPC_raw & (cells$CEBPg_pos %in% TRUE)
-cells$ASPC_raw_CEBPg_neg <- cells$ASPC_raw & !(cells$CEBPg_pos %in% TRUE)
-
-## Compatibility columns for scripts that expect them.
-cells$ASPC_CEBPg_known <- cells$ASPC
-cells$ASPC_CEBPg_unknown <- FALSE
-cells$ASPC_raw_CEBPg_known <- cells$ASPC_raw
-cells$ASPC_raw_CEBPg_unknown <- FALSE
-
-## Epithelial cancer.
-cells$EPI_CA_raw <- (cells$panCK_pos %in% TRUE) &
-                    ((cells$FOLH1_pos %in% TRUE) | (cells$AR_pos %in% TRUE))
-
-cells$EPI_CA_callable <- TRUE
-cells$EPI_CA_not_callable <- FALSE
-cells$EPI_CA <- cells$EPI_CA_raw
-
-## Neuroendocrine cancer.
-cells$NE_CA_raw <- cells$DLL3_pos %in% TRUE
-cells$NE_CA_callable <- TRUE
-cells$NE_CA_not_callable <- FALSE
-cells$NE_CA <- cells$NE_CA_raw
-
-## Blank-derived false-positive population controls.
-## These are retained as QC/audit metrics only. They do not suppress marker calls.
-cells$ASPC_blank <- cells$PDGF_blank_pos %in% TRUE
-
-cells$EPI_CA_blank <- (cells$panCK_blank_pos %in% TRUE) &
-                      ((cells$FOLH1_blank_pos %in% TRUE) |
-                       (cells$AR_blank_pos %in% TRUE))
-
-cells$NE_CA_blank <- cells$DLL3_blank_pos %in% TRUE
+## POPS drive the display label and overlap (Multi) calls; the CEBPD split is
+## a subset of PDGFRA and is counted separately below.
+POPS <- c("PDGFRA", "EPI_CA1", "EPI_CA2", "NE_CA")
+SPLIT_POPS <- c("PDGFRA_CEBPDpos", "PDGFRA_CEBPDneg")
 
 ## Display label.
+## Boolean flags above are authoritative; this label is for simple plotting/tables.
 cells$pop <- "Other"
 
-cells$pop[cells$ASPC]   <- "ASPC"
-cells$pop[cells$EPI_CA] <- "EPI_CA"
-cells$pop[cells$NE_CA]  <- "NE_CA"
+for (p in POPS) cells$pop[cells[[p]] %in% TRUE] <- p
 
-cells$n_pop_flags <- rowSums(cbind(
-  ASPC = cells$ASPC,
-  EPI_CA = cells$EPI_CA,
-  NE_CA = cells$NE_CA
-), na.rm = TRUE)
+cells$n_pop_flags <- rowSums(as.matrix(cells[, POPS]), na.rm = TRUE)
 
 cells$multi_pop <- cells$n_pop_flags > 1
 cells$pop[cells$multi_pop] <- "Multi"
-
-###############################################################################
-## OUTPUT HELPERS
-###############################################################################
-
-slide_levels <- names(table(cells$slide_id))
-n_by_slide <- as.integer(table(cells$slide_id))
-
-.sum_by_slide <- function(x) {
-  if (is.character(x)) {
-    if (!x %in% names(cells)) {
-      return(rep(NA_integer_, length(slide_levels)))
-    }
-    x <- cells[[x]]
-  }
-
-  if (length(x) != nrow(cells)) {
-    return(rep(NA_integer_, length(slide_levels)))
-  }
-
-  as.integer(tapply(.bool(x), cells$slide_id, sum, na.rm = TRUE)[slide_levels])
-}
-
-.mean_by_slide <- function(x) {
-  if (is.character(x)) {
-    if (!x %in% names(cells)) {
-      return(rep(NA_real_, length(slide_levels)))
-    }
-    x <- cells[[x]]
-  }
-
-  if (length(x) != nrow(cells)) {
-    return(rep(NA_real_, length(slide_levels)))
-  }
-
-  as.numeric(tapply(.bool(x), cells$slide_id, mean, na.rm = TRUE)[slide_levels])
-}
-
-.all_by_slide <- function(x) {
-  if (is.character(x)) {
-    if (!x %in% names(cells)) {
-      return(rep(FALSE, length(slide_levels)))
-    }
-    x <- cells[[x]]
-  }
-
-  if (length(x) != nrow(cells)) {
-    return(rep(FALSE, length(slide_levels)))
-  }
-
-  as.logical(tapply(.bool(x), cells$slide_id, function(v) all(v %in% TRUE))[slide_levels])
-}
 
 ###############################################################################
 ## OUTPUTS
@@ -757,7 +552,7 @@ saveRDS(cells, file.path(OUT, "cells_classified.rds"))
 cat("\n=== Cells per slide after QC:\n")
 print(table(cells$slide_id))
 
-cat("\n=== Single-marker positive fraction by slide, primary 6 um:\n")
+cat("\n=== Single-marker positive fraction by slide, primary 6 µm:\n")
 
 marker_frac <- sapply(names(MARKER_COMPARTMENT), function(m) {
   tapply(cells[[paste0(m, "_pos")]], cells$slide_id, mean, na.rm = TRUE)
@@ -771,21 +566,7 @@ write.csv(
   row.names = FALSE
 )
 
-cat("\n=== Single-marker QC-gated positive fraction by slide, primary 6 um:\n")
-
-marker_frac_qc <- sapply(names(MARKER_COMPARTMENT), function(m) {
-  tapply(cells[[paste0(m, "_pos_qc")]], cells$slide_id, mean, na.rm = TRUE)
-})
-
-print(round(marker_frac_qc, 4))
-
-write.csv(
-  data.frame(slide_id = rownames(marker_frac_qc), marker_frac_qc, row.names = NULL),
-  file.path(OUT, "marker_qc_positive_fraction_by_slide_primary_6um.csv"),
-  row.names = FALSE
-)
-
-cat("\n=== Single-marker blank false-positive fraction by slide, primary 6 um:\n")
+cat("\n=== Single-marker blank false-positive fraction by slide, primary 6 µm:\n")
 
 blank_frac <- sapply(names(MARKER_COMPARTMENT), function(m) {
   tapply(cells[[paste0(m, "_blank_pos")]], cells$slide_id, mean, na.rm = TRUE)
@@ -800,45 +581,22 @@ write.csv(
 )
 
 population_counts <- data.frame(
-  slide_id = slide_levels,
-  n_cells = n_by_slide,
+  slide_id = names(table(cells$slide_id)),
+  n_cells = as.integer(table(cells$slide_id)),
 
-  ASPC = .sum_by_slide("ASPC"),
-  ASPC_raw = .sum_by_slide("ASPC_raw"),
-  ASPC_not_callable = .sum_by_slide("ASPC_not_callable"),
-  ASPC_callable = .all_by_slide("ASPC_callable"),
-
-  ASPC_CEBPg_known = .sum_by_slide("ASPC_CEBPg_known"),
-  ASPC_CEBPg_pos = .sum_by_slide("ASPC_CEBPg_pos"),
-  ASPC_CEBPg_neg = .sum_by_slide("ASPC_CEBPg_neg"),
-  ASPC_CEBPg_unknown = .sum_by_slide("ASPC_CEBPg_unknown"),
-
-  ASPC_raw_CEBPg_known = .sum_by_slide("ASPC_raw_CEBPg_known"),
-  ASPC_raw_CEBPg_pos = .sum_by_slide("ASPC_raw_CEBPg_pos"),
-  ASPC_raw_CEBPg_neg = .sum_by_slide("ASPC_raw_CEBPg_neg"),
-  ASPC_raw_CEBPg_unknown = .sum_by_slide("ASPC_raw_CEBPg_unknown"),
-
-  EPI_CA = .sum_by_slide("EPI_CA"),
-  EPI_CA_raw = .sum_by_slide("EPI_CA_raw"),
-  EPI_CA_not_callable = .sum_by_slide("EPI_CA_not_callable"),
-  EPI_CA_callable = .all_by_slide("EPI_CA_callable"),
-
-  NE_CA = .sum_by_slide("NE_CA"),
-  NE_CA_raw = .sum_by_slide("NE_CA_raw"),
-  NE_CA_not_callable = .sum_by_slide("NE_CA_not_callable"),
-  NE_CA_callable = .all_by_slide("NE_CA_callable"),
-
-  Other = .sum_by_slide(cells$pop == "Other"),
-  Multi = .sum_by_slide("multi_pop"),
-
-  ASPC_blank = .sum_by_slide("ASPC_blank"),
-  EPI_CA_blank = .sum_by_slide("EPI_CA_blank"),
-  NE_CA_blank = .sum_by_slide("NE_CA_blank"),
+  sapply(c(POPS, SPLIT_POPS), function(p) as.integer(tapply(cells[[p]], cells$slide_id, sum, na.rm = TRUE))),
+  Other = as.integer(tapply(cells$pop == "Other", cells$slide_id, sum, na.rm = TRUE)),
+  Multi = as.integer(tapply(cells$multi_pop, cells$slide_id, sum, na.rm = TRUE)),
+  setNames(
+    as.data.frame(sapply(c(POPS, SPLIT_POPS), function(p)
+      as.integer(tapply(cells[[paste0(p, "_blank")]], cells$slide_id, sum, na.rm = TRUE)))),
+    paste0(c(POPS, SPLIT_POPS), "_blank")
+  ),
 
   row.names = NULL
 )
 
-cat("\n=== Population counts by slide, primary 6 um:\n")
+cat("\n=== Population counts by slide, primary 6 µm:\n")
 print(population_counts)
 
 write.csv(
@@ -849,14 +607,11 @@ write.csv(
 
 population_fractions <- population_counts
 
-for (cl in setdiff(
-  names(population_fractions),
-  c("slide_id", "n_cells", "ASPC_callable", "EPI_CA_callable", "NE_CA_callable")
-)) {
+for (cl in setdiff(names(population_fractions), c("slide_id", "n_cells"))) {
   population_fractions[[cl]] <- population_fractions[[cl]] / population_fractions$n_cells
 }
 
-cat("\n=== Population fractions by slide, primary 6 um:\n")
+cat("\n=== Population fractions by slide, primary 6 µm:\n")
 print(population_fractions)
 
 write.csv(
@@ -865,68 +620,7 @@ write.csv(
   row.names = FALSE
 )
 
-aspc_callable_summary <- cells |>
-  group_by(slide_id) |>
-  summarise(
-    ASPC_callable = all(.data$ASPC_callable %in% TRUE),
-    PDGF_usable = all(.data$PDGF_usable %in% TRUE),
-    ASPC = sum(.data$ASPC, na.rm = TRUE),
-    ASPC_raw = sum(.data$ASPC_raw, na.rm = TRUE),
-    ASPC_not_callable = sum(.data$ASPC_not_callable, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-cat("\n=== ASPC callability by slide:\n")
-print(as.data.frame(aspc_callable_summary), row.names = FALSE)
-
-write.csv(
-  aspc_callable_summary,
-  file.path(OUT, "aspc_callability_by_slide.csv"),
-  row.names = FALSE
-)
-
-population_callability_summary <- cells |>
-  group_by(slide_id) |>
-  summarise(
-    ASPC_callable = all(.data$ASPC_callable %in% TRUE),
-    EPI_CA_callable = all(.data$EPI_CA_callable %in% TRUE),
-    NE_CA_callable = all(.data$NE_CA_callable %in% TRUE),
-
-    PDGF_usable = all(.data$PDGF_usable %in% TRUE),
-    panCK_usable = all(.data$panCK_usable %in% TRUE),
-    FOLH1_usable = all(.data$FOLH1_usable %in% TRUE),
-    AR_usable = all(.data$AR_usable %in% TRUE),
-    DLL3_usable = all(.data$DLL3_usable %in% TRUE),
-    CEBPg_usable = all(.data$CEBPg_usable %in% TRUE),
-
-    n_ASPC = sum(.data$ASPC, na.rm = TRUE),
-    n_ASPC_raw = sum(.data$ASPC_raw, na.rm = TRUE),
-    n_ASPC_not_callable = sum(.data$ASPC_not_callable, na.rm = TRUE),
-
-    n_EPI_CA = sum(.data$EPI_CA, na.rm = TRUE),
-    n_EPI_CA_raw = sum(.data$EPI_CA_raw, na.rm = TRUE),
-    n_EPI_CA_not_callable = sum(.data$EPI_CA_not_callable, na.rm = TRUE),
-
-    n_NE_CA = sum(.data$NE_CA, na.rm = TRUE),
-    n_NE_CA_raw = sum(.data$NE_CA_raw, na.rm = TRUE),
-    n_NE_CA_not_callable = sum(.data$NE_CA_not_callable, na.rm = TRUE),
-
-    .groups = "drop"
-  )
-
-cat("\n=== Population callability by slide:\n")
-print(as.data.frame(population_callability_summary), row.names = FALSE)
-
-write.csv(
-  population_callability_summary,
-  file.path(OUT, "population_callability_by_slide.csv"),
-  row.names = FALSE
-)
-
-cat("\n=== Overlapping final callable population flags:\n")
+cat("\n=== Overlapping population flags:\n")
 print(table(cells$n_pop_flags))
-
-cat("\n=== Display population labels:\n")
-print(table(cells$pop))
 
 message("\n03_classify.R complete -> ", file.path(OUT, "cells_classified.rds"))

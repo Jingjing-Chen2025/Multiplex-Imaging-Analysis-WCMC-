@@ -3,14 +3,14 @@
 # Build the per-slide channel map (chmap) DIRECTLY from OME-XML metadata.
 #
 # WHY v4:
-#   (a) PM0T32 was re-acquired 20260826 on the standard 8-cycle protocol WITH
+#   (a) PMOT32 was re-acquired 20260826 on the standard 8-cycle protocol WITH
 #       secondary-only negative controls (AR/DLL3 = Cycle 6). The hardcoded
 #       20260420 path override is removed and replaced with a generic
 #       .ome.tiff resolver that applies to every slide.
 #   (b) Marker matching was done with literal regexes against the raw channel
 #       name, so "JJ pan - CK - 1-200" (spaces around the hyphen, as written in
 #       the 20260826 jobfile) failed to match "pan-?ck" and panCK resolved to
-#       NA on PM0T32 only. Matching is now done against a NORMALISED name with
+#       NA on PMOT32 only. Matching is now done against a NORMALISED name with
 #       all non-alphanumeric characters stripped, which tolerates arbitrary
 #       spacing, punctuation, vendor prefixes and dilution suffixes.
 #   (c) Marker assignments are now cross-checked against the expected
@@ -28,14 +28,14 @@
 # Expected OME layout (22-plane files):
 #    1-8  DAPI (one per cycle; some named "DAPI-<marker>")
 #    9,10 TRITC, Cy5   <- pair 1  (AF baseline)
-#   11    JJ CEBPg
+#   11    JJ CEBPD
 #   12,13 TRITC, Cy5   <- pair 2  (NC3)
 #   14    JJ FOLH1
 #   15,16 TRITC, Cy5   <- pair 3  (NC5)
 #   17    JJ DLL3
 #   18    JJ AR-Androgen Receptor
 #   19    JJ pan-CK
-#   20    JJ PDGFa
+#   20    JJ PDGFRA
 #   21,22 TRITC, Cy5   <- pair 4  (terminal control)
 ###############################################################################
 
@@ -44,13 +44,13 @@ suppressPackageStartupMessages({
 })
 use_virtualenv("r-reticulate", required = TRUE)
 
-if (!exists("OUT")) OUT <- "/Volumes/T9/results_ASPC_NEPC"
+if (!exists("OUT")) OUT <- "/Volumes/T9/Case Studies/multiplex_analysis_20261013_PDGFRA_v2"
 dir.create(OUT, showWarnings = FALSE, recursive = TRUE)
 
 slides <- readRDS(file.path(OUT, "slides_final.rds"))
 
 ## ---- prefer .ome.tiff sidecars, for every slide ----------------------------
-## Replaces the v3 PM0T32-specific path override. If a matching .ome.tiff sits
+## Replaces the v3 PMOT32-specific path override. If a matching .ome.tiff sits
 ## next to the plain .tiff, use it, because only the OME variant carries the
 ## Channel metadata this script depends on.
 resolve_ome <- function(p) {
@@ -131,13 +131,13 @@ ome_px_um <- function(tiff) {
 ## COMET channel names are free text and vary between operators and software
 ## versions. Observed forms for pan-cytokeratin across this cohort include
 ##   "JJ pan-CK"          (1.4.1.0 runs)
-##   "JJ pan - CK - 1-200" (1.5.0.0, PM0T32 20260826)
+##   "JJ pan - CK - 1-200" (1.5.0.0, PMOT32 20260826)
 ## A literal regex on the raw string matches the first and not the second.
 ##
 ## Fix: normalise by lowercasing and deleting every non-alphanumeric character
 ## before matching, so
 ##   "JJ pan - CK - 1-200"              -> "jjpanck1200"      contains "panck"
-##   "Jingjing PDGFa 647 (Cy5) [1_100]" -> "jingjingpdgfa647cy51100"
+##   "Jingjing PDGFRA 647 (Cy5) [1_100]" -> "jingjingpdgfra647cy51100"
 ## Patterns below are therefore written WITHOUT spaces or punctuation.
 
 .norm <- function(s) {
@@ -148,18 +148,18 @@ ome_px_um <- function(tiff) {
 ## AR is anchored on "androgenreceptor" rather than a bare "ar", which would
 ## match as a substring in many unrelated antibody names.
 MARKER_PATTERNS <- list(
-  CEBPg = c("cebpg", "cebp"),
+  CEBPD = c("cebpd", "cebp"),
   FOLH1 = c("folh1", "psma"),
   DLL3  = c("dll3", "notchligand"),
   AR    = c("androgenreceptor", "jjar"),
   panCK = c("panck", "ckpan", "ae1ae3", "cytokeratin"),
-  PDGF  = c("pdgfa", "pdgf")
+  PDGFRA  = c("pdgfra", "pdgf")
 )
 
 ## Expected emission channel per marker, from the COMET run log. Used as a
 ## consistency check only; a mismatch is reported, never silently accepted.
 MARKER_FLUOR <- c(
-  CEBPg = "Cy5",  FOLH1 = "Cy5",  AR = "Cy5",  PDGF = "Cy5",
+  CEBPD = "Cy5",  FOLH1 = "Cy5",  AR = "Cy5",  PDGFRA = "Cy5",
   DLL3  = "TRITC", panCK = "TRITC"
 )
 
@@ -171,7 +171,7 @@ build_chmap <- function(nm) {
   low <- tolower(nm)
   nrm <- .norm(nm)
 
-  is_dapi  <- grepl("^dapi", low)                       # "DAPI", "DAPI-JJ CEBPg"
+  is_dapi  <- grepl("^dapi", low)                       # "DAPI", "DAPI-JJ CEBPD"
   DAPI_all <- which(is_dapi)
 
   ## cycle-matched DAPI for the AR/DLL3 round; fall back to the last DAPI
@@ -181,7 +181,7 @@ build_chmap <- function(nm) {
   DAPI_AR <- dapi_ar[1]
 
   ## marker planes: match on the normalised name and exclude DAPI-prefixed
-  ## entries so "DAPI-JJ CEBPg" can never win over the marker plane itself.
+  ## entries so "DAPI-JJ CEBPD" can never win over the marker plane itself.
   mk <- function(marker) {
     pats <- MARKER_PATTERNS[[marker]]
     hit  <- which(!is_dapi &
@@ -197,12 +197,12 @@ build_chmap <- function(nm) {
   chmap <- list(
     DAPI_all = DAPI_all,
     DAPI_AR  = DAPI_AR,
-    CEBPg    = mk("CEBPg"),
+    CEBPD    = mk("CEBPD"),
     FOLH1    = mk("FOLH1"),
     DLL3     = mk("DLL3"),
     AR       = mk("AR"),
     panCK    = mk("panCK"),
-    PDGF     = mk("PDGF")
+    PDGFRA     = mk("PDGFRA")
   )
 
   ## ---- control pairs: consecutive TRITC/Cy5 blanks, in acquisition order ----
@@ -289,7 +289,7 @@ verify_dapi <- function(tiff, chmap, W = 512L) {
 ## RUN
 ###############################################################################
 inv  <- list(); info <- list(); rep_rows <- list(); slot_rows <- list()
-MK <- c("CEBPg","FOLH1","DLL3","AR","panCK","PDGF")
+MK <- c("CEBPD","FOLH1","DLL3","AR","panCK","PDGFRA")
 unresolved <- character(0)
 
 for (k in seq_len(nrow(slides))) {
@@ -347,8 +347,8 @@ for (k in seq_len(nrow(slides))) {
     dapi_declared = paste(cm$DAPI_all, collapse = ","),
     dapi_empirical = paste(v$empirical_dapi, collapse = ","),
     agrees = v$agrees, min_dapi_cor = v$min_dapi_cor,
-    DAPI_AR = cm$DAPI_AR, CEBPg = cm$CEBPg, FOLH1 = cm$FOLH1,
-    DLL3 = cm$DLL3, AR = cm$AR, panCK = cm$panCK, PDGF = cm$PDGF,
+    DAPI_AR = cm$DAPI_AR, CEBPD = cm$CEBPD, FOLH1 = cm$FOLH1,
+    DLL3 = cm$DLL3, AR = cm$AR, panCK = cm$panCK, PDGFRA = cm$PDGFRA,
     stringsAsFactors = FALSE)
 }
 
