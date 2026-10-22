@@ -1,5 +1,13 @@
 ###############################################################################
-# 02_segment_measure.R  v11.2
+# 02_segment_measure.R  v11.3
+#
+# CHANGE IN v11.3 (2026-10-22): tissue mask and nuclear threshold. See the comments in process_tile.
+#   v11.2 built the per-tile tissue mask from Otsu on 15-px-blurred DAPI and thresholded nuclei with a
+#   global per-tile Otsu. In tiles that also hold bright, densely packed tumour nuclei both thresholds
+#   rise, and the loose stroma between nests, with its dimmer nuclei, was treated as background: on test
+#   tiles of PM12_B3 and PM677_A8, 15-36% of nuclei were never segmented, nearly all of them stromal.
+#   v11.3 adds a local adaptive candidate-nucleus mask above an absolute floor, unions its dilation into
+#   the tissue mask, and ORs it into the nuclear mask. Everything downstream is unchanged.
 #
 # Tiled segmentation + corrected per-compartment marker feature extraction.
 #
@@ -62,7 +70,7 @@
 ## USER / RUN DEFAULTS
 ###############################################################################
 
-if (!exists("OUT")) OUT <- "/Volumes/T9/Case Studies/multiplex_analysis_20261013_PDGFRA_v2"
+if (!exists("OUT")) OUT <- "/Volumes/T9/Case Studies/multiplex_analysis_20261022_maskfix"
 dir.create(OUT, showWarnings = FALSE, recursive = TRUE)
 
 if (!exists("ROOT")) ROOT <- "/Volumes/T9/Case Studies"
@@ -196,6 +204,12 @@ MAX_AREA_UM2 <- 400
 
 MIN_AREA_PX <- MIN_AREA_UM2 / PX_UM^2
 MAX_AREA_PX <- MAX_AREA_UM2 / PX_UM^2
+
+## v11.3 tissue-mask / nuclear-threshold parameters (tested 2026-10-22 on five tiles)
+if (!exists("ADAPT_W")) ADAPT_W <- 25L            # half-window of the local adaptive threshold, px
+if (!exists("ADAPT_OFFSET")) ADAPT_OFFSET <- 0.02  # offset above the local mean, in units of the tile maximum
+if (!exists("FLOOR_K")) FLOOR_K <- 3               # absolute floor: FLOOR_K x the tile dark-background median
+if (!exists("MASK_DILATE_UM")) MASK_DILATE_UM <- 8 # dilation of candidate nuclei folded into the tissue mask, um
 
 QC_WIN <- 512L
 
@@ -826,15 +840,24 @@ process_tile <- function(tiff, cm, x0, y0, w, h, sid) {
 
   d_s <- gblur(d, sigma = 1)
 
-  ## Tissue mask.
+  ## Tissue mask (v11.3). Otsu on blurred DAPI alone (v11.2) rose with bright tumour nuclei and dropped
+  ## the loose stroma between nests. The mask is now the union of that Otsu mask and a dilated
+  ## candidate-nucleus mask from a local adaptive threshold above an absolute floor.
   tb <- gblur(d, 15)
-  tis <- tb > otsu(tb)
+  tis0 <- tb > otsu(tb)
   rm(tb)
+  tis0 <- fillHull(opening(tis0, makeBrush(15, "disc")))
 
+  bg <- if (any(!tis0)) median(d[!tis0]) else as.numeric(quantile(d, 0.02))
+  if (!is.finite(bg) || bg <= 0) bg <- as.numeric(quantile(d, 0.02))
+  cand <- thresh(d_s, w = ADAPT_W, h = ADAPT_W, offset = ADAPT_OFFSET) & (d_s > FLOOR_K * bg)
+  cand <- opening(cand, makeBrush(3, "disc"))
+  tis <- tis0 | dilate(cand, makeBrush(2L * as.integer(round(MASK_DILATE_UM / PX_UM)) + 1L, "disc"))
   tis <- fillHull(opening(tis, makeBrush(15, "disc")))
+  rm(tis0)
 
   if (sum(tis) < 2000) {
-    rm(d, d_s, tis)
+    rm(d, d_s, tis, cand)
     gc(FALSE)
     return(NULL)
   }
@@ -854,12 +877,14 @@ process_tile <- function(tiff, cm, x0, y0, w, h, sid) {
     ))
 
   } else {
-    th <- (d_s > otsu(d_s)) & tis
+    ## v11.3: the global Otsu is set by the brightest nuclei of the tile; dim stromal nuclei enter through
+    ## the same adaptive candidates used for the tissue mask.
+    th <- ((d_s > otsu(d_s)) | cand) & tis
     th <- opening(th, makeBrush(3, "disc"))
     th <- fillHull(th)
 
     nuc <- watershed(distmap(th), tolerance = 2, ext = 3)
-    rm(th)
+    rm(th, cand)
   }
 
   sh0 <- computeFeatures.shape(nuc)
