@@ -58,3 +58,14 @@ Population rules only affect 03 and 04, so they can be re-run on an existing
 - Slides: NEPC PM0T32 (2026-10-02 re-stain), PM677_A8, PM12_B3; ADENO PM1024_B, PM423, PM159T5.
 - With three slides per group, group comparisons are descriptive only (minimum
   two-sided Wilcoxon p = 0.1).
+
+## Segmentation update, 2026-10-22 (02_segment_measure.R v11.3)
+
+v11.2 built the per-tile tissue mask from Otsu on 15-px-blurred DAPI and thresholded nuclei with a global per-tile
+Otsu. In tiles that also held bright, densely packed tumour nuclei both thresholds rose and the loose stroma between
+nests, with its dimmer nuclei, was treated as background: on test tiles of PM12_B3 and PM677_A8, 15-36% of nuclei,
+nearly all stromal, were never segmented. v11.3 adds a local adaptive candidate-nucleus mask above an absolute floor
+(3x the tile dark-background median), folds its dilation into the tissue mask and ORs it into the nuclear mask.
+Parameters: ADAPT_W = 25 px, ADAPT_OFFSET = 0.02 of the tile maximum, FLOOR_K = 3, MASK_DILATE_UM = 8. Everything
+downstream (opening, hull fill, watershed, 8-400 um2 area filter, ring measurement, gates) is unchanged.
+`run_all.sh` is the three-worker from-scratch driver used for the v11.3 run (`run_02_parallel.sh` is the earlier one).
