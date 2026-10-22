@@ -1,5 +1,15 @@
 ###############################################################################
-# 02_segment_measure.R  v11.3
+# 02_segment_measure.R  v11.4
+#
+# CHANGE IN v11.4 (2026-10-22): matched-blank pairing corrected to species + fluorophore.
+#   v11.3 paired FOLH1 with NC3_Cy5 and PDGFRA / panCK with NC5, matching the fluorophore only. From the
+#   COMET run logs, the negative-control cycles are
+#     cycle 3 (NC3): anti-rabbit 647 (Cy5) + anti-mouse 555 (TRITC)
+#     cycle 5 (NC5): anti-mouse 647 (Cy5)  + anti-rabbit 555 (TRITC)
+#   and the stains are CEBPD rabbit/647, FOLH1 mouse/647, AR mouse/647, DLL3 rabbit/555, PDGFRA rabbit/647,
+#   panCK mouse/555. The species-matched blank is therefore NC3 for CEBPD, PDGFRA and panCK, and NC5 for
+#   FOLH1, AR and DLL3. Three markers (FOLH1, PDGFRA, panCK) were previously subtracted against the
+#   wrong-species secondary. Only CTRL_OF changes; cells_raw.rds must be regenerated (02) and 03/04 re-run.
 #
 # CHANGE IN v11.3 (2026-10-22): tissue mask and nuclear threshold. See the comments in process_tile.
 #   v11.2 built the per-tile tissue mask from Otsu on 15-px-blurred DAPI and thresholded nuclei with a
@@ -259,20 +269,23 @@ CTRL_CHANS <- c(
 
 MARKERS <- c(MARKERS_CORE, CTRL_CHANS)
 
-## Corrected from COMET run log:
-##   CEBPD  Cy5
-##   FOLH1  Cy5
-##   AR     Cy5
-##   DLL3   TRITC
-##   PDGFRA  Cy5
-##   panCK  TRITC
+## Matched secondary-only blank for each marker, by species AND fluorophore
+## (COMET run logs, all six slides):
+##   marker  host    secondary / channel   blank cycle (same secondary)
+##   CEBPD   rabbit  anti-rabbit 647 Cy5   NC3_Cy5
+##   FOLH1   mouse   anti-mouse  647 Cy5   NC5_Cy5
+##   AR      mouse   anti-mouse  647 Cy5   NC5_Cy5
+##   DLL3    rabbit  anti-rabbit 555 TRITC NC5_TRITC
+##   PDGFRA  rabbit  anti-rabbit 647 Cy5   NC3_Cy5
+##   panCK   mouse   anti-mouse  555 TRITC NC3_TRITC
+## v11.3 and earlier matched fluorophore only (FOLH1 -> NC3, PDGFRA/panCK -> NC5).
 CTRL_OF <- c(
-  CEBPD = "NC3_Cy5",
-  FOLH1 = "NC3_Cy5",
-  AR    = "NC5_Cy5",
-  DLL3  = "NC5_TRITC",
-  PDGFRA  = "NC5_Cy5",
-  panCK = "NC5_TRITC"
+  CEBPD  = "NC3_Cy5",
+  FOLH1  = "NC5_Cy5",
+  AR     = "NC5_Cy5",
+  DLL3   = "NC5_TRITC",
+  PDGFRA = "NC3_Cy5",
+  panCK  = "NC3_TRITC"
 )
 
 MARKER_COMPARTMENT <- c(

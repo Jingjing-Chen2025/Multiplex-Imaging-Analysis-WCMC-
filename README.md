@@ -69,3 +69,13 @@ nearly all stromal, were never segmented. v11.3 adds a local adaptive candidate-
 Parameters: ADAPT_W = 25 px, ADAPT_OFFSET = 0.02 of the tile maximum, FLOOR_K = 3, MASK_DILATE_UM = 8. Everything
 downstream (opening, hull fill, watershed, 8-400 um2 area filter, ring measurement, gates) is unchanged.
 `run_all.sh` is the three-worker from-scratch driver used for the v11.3 run (`run_02_parallel.sh` is the earlier one).
+
+## Control-pairing fix, 2026-10-22 (02_segment_measure.R v11.4)
+
+The matched secondary-only blank is now chosen by species and fluorophore. From the COMET run logs,
+cycle 3 is anti-rabbit 647 + anti-mouse 555 and cycle 5 is anti-mouse 647 + anti-rabbit 555, so the
+blanks are: CEBPD, PDGFRA -> NC3 Cy5; pan-CK -> NC3 TRITC; FOLH1, AR -> NC5 Cy5; DLL3 -> NC5 TRITC.
+v11.3 paired FOLH1 with NC3 and PDGFRA / pan-CK with NC5 (fluorophore only, wrong species). The
+`Negative-control pairing` comment in `00_config.R` already described the correct pairing for cycles 6
+and 7. Segmentation (02), gates (03) and analyses (04) must be re-run; results before this fix used the
+wrong blank for FOLH1, PDGFRA and pan-CK.
